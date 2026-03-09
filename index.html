@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MARSHALL // APEX COMMAND</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=VT323&display=swap');
+
+  :root {
+    --amber: #ffb000;
+    --amber-dim: #7a5200;
+    --amber-glow: rgba(255,176,0,0.15);
+    --green: #00ff88;
+    --green-dim: #004422;
+    --red: #ff3333;
+    --red-dim: #440000;
+    --bg: #080806;
+    --bg2: #0d0d09;
+    --grid: rgba(255,176,0,0.06);
+    --border: rgba(255,176,0,0.35);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; image-rendering: pixelated; }
+  html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+  body {
+    background: var(--bg);
+    color: var(--amber);
+    font-family: 'Share Tech Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+    cursor: crosshair;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Scanlines removed — retina screens render them as blur not lines */
+  body::before { display: none; }
+
+  /* Grid background */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,176,0,0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,176,0,0.07) 1px, transparent 1px);
+    background-size: 48px 48px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  /* ── HEADER ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+
+  .title {
+    font-family: 'Orbitron', monospace;
+    font-size: 28px;
+    font-weight: 900;
+    letter-spacing: 8px;
+    color: var(--amber);
+    
+    
+  }
+
+  @keyframes flicker {
+    0%,95%,97%,100% { opacity:1; }
+    96% { opacity:0.8; }
+  }
+
+  .subtitle {
+    font-size: 11px;
+    letter-spacing: 4px;
+    color: var(--amber-dim);
+    text-transform: uppercase;
+  }
+
+  .header-right {
+    text-align: right;
+    font-size: 11px;
+    color: var(--amber-dim);
+    letter-spacing: 2px;
+  }
+
+  .clock {
+    font-family: 'VT323', monospace;
+    font-size: 32px;
+    color: var(--amber);
+    line-height: 1;
+    
+  }
+
+  /* ── STATUS BAR ── */
+  .status-bar {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 20px;
+  }
+
+  .status-pill {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  .status-pill .label { color: var(--amber-dim); display: block; margin-bottom: 4px; }
+  .status-pill .value { color: var(--amber); font-size: 13px; }
+  .status-pill .value.green { color: var(--green);  }
+  .status-pill .value.red { color: var(--red);  }
+  .status-pill .value.amber { color: var(--amber);  }
+
+  /* ── GRID LAYOUT ── */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 380px;
+    grid-template-rows: auto auto;
+    gap: 12px;
+  }
+
+  /* ── PANELS ── */
+  .panel {
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--amber), transparent);
+    opacity: 0.6;
+  }
+
+  .panel-header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(255,176,0,0.04);
+  }
+
+  .panel-title {
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: var(--amber-dim);
+    text-transform: uppercase;
+  }
+
+  .panel-badge {
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 2px 6px;
+    border: 1px solid currentColor;
+  }
+
+  .panel-badge.live { color: var(--green);  }
+  .panel-badge.warn { color: var(--amber); }
+  .panel-badge.alert { color: var(--red); }
+
+  @keyframes pulse-green {
+    0%,100% { opacity:1; }
+    50% { opacity:0.5; }
+  }
+
+  .panel-body { padding: 16px; }
+
+  /* ── PORTFOLIO PANEL ── */
+  .equity-display {
+    margin-bottom: 20px;
+  }
+
+  .equity-value {
+    font-family: 'VT323', monospace;
+    font-size: 52px;
+    line-height: 1;
+    color: var(--amber);
+    
+    letter-spacing: 2px;
+  }
+
+  .equity-change {
+    font-size: 13px;
+    letter-spacing: 2px;
+    margin-top: 4px;
+  }
+
+  .equity-change.negative { color: var(--red); }
+  .equity-change.positive { color: var(--green); }
+
+  .equity-bar {
+    height: 3px;
+    background: var(--red-dim);
+    margin: 12px 0;
+    position: relative;
+  }
+
+  .equity-bar-fill {
+    height: 100%;
+    background: var(--red);
+    
+    transition: width 1s ease;
+  }
+
+  .equity-bar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--amber-dim);
+    letter-spacing: 1px;
+  }
+
+  /* ── POSITIONS ── */
+  .positions-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+
+  .positions-table th {
+    color: var(--amber-dim);
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-weight: normal;
+  }
+
+  .positions-table td {
+    padding: 8px 8px;
+    border-bottom: 1px solid rgba(255,176,0,0.05);
+    letter-spacing: 1px;
+  }
+
+  .positions-table tr:last-child td { border-bottom: none; }
+
+  .ticker-badge {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--amber);
+  }
+
+  .pl-positive { color: var(--green); }
+  .pl-negative { color: var(--red); }
+
+  /* ── COMMAND PANEL ── */
+  .command-panel { grid-row: span 2; }
+
+  .cmd-instruction {
+    font-size: 10px;
+    color: var(--amber-dim);
+    letter-spacing: 1px;
+    margin-bottom: 16px;
+    line-height: 1.8;
+    padding: 10px;
+    border: 1px solid var(--border);
+    background: rgba(255,176,0,0.02);
+  }
+
+  .cmd-instruction strong { color: var(--amber); }
+
+  .command-input-wrap {
+    position: relative;
+    margin-bottom: 12px;
+  }
+
+  .command-prefix {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: 'VT323', monospace;
+    font-size: 20px;
+    color: var(--amber-dim);
+    pointer-events: none;
+  }
+
+  .command-input {
+    width: 100%;
+    background: rgba(255,176,0,0.04);
+    border: 1px solid var(--border);
+    color: var(--amber);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 2px;
+    padding: 12px 12px 12px 32px;
+    outline: none;
+    text-transform: uppercase;
+    transition: border-color 0.1s;
+  }
+
+  .command-input:focus {
+    border-color: var(--amber);
+    
+  }
+
+  .command-input::placeholder { color: var(--amber-dim); text-transform: uppercase; }
+
+  .cmd-btn {
+    width: 100%;
+    padding: 12px;
+    background: transparent;
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    letter-spacing: 4px;
+    cursor: crosshair;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .cmd-btn:hover {
+    background: rgba(255,176,0,0.1);
+    
+  }
+
+  .cmd-btn:active { transform: scale(0.99); }
+
+  .cmd-btn.override {
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .cmd-btn.override:hover {
+    background: rgba(255,51,51,0.1);
+    
+  }
+
+  .cmd-btn.safe {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .cmd-btn.safe:hover {
+    background: rgba(0,255,136,0.08);
+    
+  }
+
+  .cmd-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
+  }
+
+  .quick-commands {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  .quick-btn {
+    padding: 8px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--amber-dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 2px;
+    cursor: crosshair;
+    transition: all 0.15s;
+    text-align: center;
+    text-transform: uppercase;
+  }
+
+  .quick-btn:hover {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: var(--amber-glow);
+  }
+
+  /* ── DIRECTIVE PANEL ── */
+  .directive-display {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .directive-badge {
+    font-family: 'Orbitron', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    padding: 8px 16px;
+    border: 1px solid currentColor;
+  }
+
+  .directive-badge.FULL_DEPLOY { color: var(--green);  }
+  .directive-badge.REDUCED_RISK { color: var(--amber);  }
+  .directive-badge.DEFENSIVE { color: #ff8800; }
+  .directive-badge.STAND_DOWN { color: var(--red);   }
+  .directive-badge.OPPORTUNISTIC { color: #88ffff; }
+
+  @keyframes pulse-red {
+    0%,100% { opacity:1;  }
+    50% { opacity:0.7;  }
+  }
+
+  .directive-meta { font-size: 10px; color: var(--amber-dim); line-height: 2; letter-spacing: 1px; }
+
+  .memo-box {
+    font-size: 11px;
+    line-height: 1.8;
+    color: var(--amber);
+    padding: 12px;
+    border: 1px solid var(--border);
+    background: rgba(255,176,0,0.02);
+    letter-spacing: 0.5px;
+    min-height: 80px;
+  }
+
+  /* ── LOG PANEL ── */
+  .log-panel { grid-column: span 2; }
+
+  .log-scroll {
+    height: 160px;
+    overflow-y: auto;
+    font-size: 10px;
+    line-height: 2;
+    letter-spacing: 1px;
+  }
+
+  .log-scroll::-webkit-scrollbar { width: 4px; }
+  .log-scroll::-webkit-scrollbar-track { background: var(--bg); }
+  .log-scroll::-webkit-scrollbar-thumb { background: var(--amber-dim); }
+
+  .log-line { display: flex; gap: 12px; }
+  .log-time { color: var(--amber-dim); flex-shrink: 0; }
+  .log-msg { color: var(--amber); }
+  .log-msg.success { color: var(--green); }
+  .log-msg.error { color: var(--red); }
+  .log-msg.warn { color: #ff8800; }
+
+  /* ── RESPONSE PANEL ── */
+  .response-area {
+    background: rgba(255,176,0,0.02);
+    border: 1px solid var(--border);
+    padding: 14px;
+    font-size: 11px;
+    line-height: 1.9;
+    letter-spacing: 0.5px;
+    min-height: 120px;
+    white-space: pre-wrap;
+    color: var(--amber);
+    margin-top: 12px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .response-area.empty { color: var(--amber-dim); font-style: italic; }
+
+  /* ── LOADING INDICATOR ── */
+  .loading {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--amber-dim);
+    margin-top: 8px;
+  }
+
+  .loading.active { display: flex; }
+
+  .loading-dots span {
+    display: inline-block;
+    animation: blink 1.2s infinite;
+    font-family: 'VT323', monospace;
+    font-size: 20px;
+  }
+
+  .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes blink { 0%,80%,100%{opacity:0} 40%{opacity:1} }
+
+  /* ── OVERRIDE MODAL ── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 500;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    border: 1px solid var(--red);
+    background: var(--bg);
+    padding: 32px;
+    max-width: 440px;
+    width: 90%;
+    
+    position: relative;
+  }
+
+  .modal-title {
+    font-family: 'Orbitron', monospace;
+    font-size: 14px;
+    letter-spacing: 4px;
+    color: var(--red);
+    margin-bottom: 16px;
+    
+  }
+
+  .modal-body {
+    font-size: 11px;
+    line-height: 2;
+    color: var(--amber);
+    letter-spacing: 1px;
+    margin-bottom: 24px;
+  }
+
+  .modal-confirm-input {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 3px;
+    padding: 10px 12px;
+    outline: none;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  .modal-btns { display: flex; gap: 8px; }
+
+  .modal-btn-cancel {
+    flex: 1;
+    padding: 10px;
+    background: transparent;
+    border: 1px solid var(--amber-dim);
+    color: var(--amber-dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    cursor: crosshair;
+  }
+
+  .modal-btn-execute {
+    flex: 1;
+    padding: 10px;
+    background: rgba(255,51,51,0.1);
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    cursor: crosshair;
+  }
+
+  .modal-btn-execute:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* ── THRESHOLD BAR ── */
+  .threshold-section { margin-top: 16px; }
+  .threshold-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--amber-dim);
+    margin-bottom: 6px;
+  }
+
+  .threshold-track {
+    height: 4px;
+    background: var(--red-dim);
+    position: relative;
+  }
+
+  .threshold-fill {
+    height: 100%;
+    background: var(--amber);
+    transition: width 1s ease;
+  }
+
+  .threshold-markers {
+    display: flex;
+    justify-content: space-between;
+    font-size: 8px;
+    color: var(--amber-dim);
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+
+  /* ── TOAST ── */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 600;
+    border: 1px solid var(--amber);
+    background: var(--bg);
+    padding: 12px 20px;
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--amber);
+    transform: translateY(80px);
+    opacity: 0;
+    transition: all 0.3s;
+    
+  }
+
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .toast.success { border-color: var(--green); color: var(--green); }
+  .toast.error { border-color: var(--red); color: var(--red); }
+
+  /* ── BLINK CURSOR ── */
+  .blink { animation: blink-cursor 1s step-end infinite; }
+  @keyframes blink-cursor { 0%,100%{opacity:1} 50%{opacity:0} }
+
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-left">
+      <div>
+        <div class="title">MARSHALL</div>
+        <div class="subtitle">APEX Command Layer // General G.C. Marshall Protocol</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="clock" id="clock">00:00:00</div>
+      <div style="margin-top:4px">EASTERN TIME // PAPER MODE</div>
+      <div id="market-status" style="margin-top:2px;letter-spacing:2px;font-size:10px">CHECKING MARKET...</div>
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div class="status-bar">
+    <div class="status-pill">
+      <span class="label">PORTFOLIO VALUE</span>
+      <span class="value amber" id="sb-equity">——</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">TOTAL P&amp;L</span>
+      <span class="value" id="sb-pl">——</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">CASH AVAILABLE</span>
+      <span class="value amber" id="sb-cash">——</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">VIX LEVEL</span>
+      <span class="value" id="sb-vix">——</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">SYSTEM STATUS</span>
+      <span class="value green" id="sb-status">ONLINE</span>
+    </div>
+  </div>
+
+  <!-- MAIN GRID -->
+  <div class="grid">
+
+    <!-- PORTFOLIO PANEL -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">PORTFOLIO // ALPACA PAPER</span>
+        <span class="panel-badge live">● LIVE</span>
+      </div>
+      <div class="panel-body">
+        <div class="equity-display">
+          <div class="equity-value" id="equity-display">$——,———.——</div>
+          <div class="equity-change negative" id="equity-change">——</div>
+        </div>
+
+        <div class="threshold-section">
+          <div class="threshold-label">
+            <span>INTERVENTION THRESHOLD — $85,000</span>
+            <span id="threshold-pct">——%</span>
+          </div>
+          <div class="threshold-track">
+            <div class="threshold-fill" id="threshold-fill" style="width:100%"></div>
+          </div>
+          <div class="threshold-markers">
+            <span>$75K STOP</span>
+            <span>$80K PRESERVE</span>
+            <span>$85K ⚠ INTERVENE</span>
+            <span>$90K CONSERV</span>
+            <span>$100K START</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- POSITIONS PANEL -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">OPEN POSITIONS</span>
+        <span class="panel-badge live" id="pos-count">0 POSITIONS</span>
+      </div>
+      <div class="panel-body">
+        <table class="positions-table">
+          <thead>
+            <tr>
+              <th>TICKER</th>
+              <th>SHARES</th>
+              <th>PRICE</th>
+              <th>VALUE</th>
+              <th>P&amp;L</th>
+              <th>%</th>
+            </tr>
+          </thead>
+          <tbody id="positions-body">
+            <tr><td colspan="6" style="color:var(--amber-dim);font-size:10px;letter-spacing:2px">LOADING POSITIONS...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- COMMAND PANEL -->
+    <div class="panel command-panel">
+      <div class="panel-header">
+        <span class="panel-title">COMMAND INPUT</span>
+        <span class="panel-badge warn">MANUAL</span>
+      </div>
+      <div class="panel-body">
+
+        <div class="cmd-instruction">
+          SEND EMAIL TO:<br>
+          <strong>apex@coraemjen.resend.app</strong><br><br>
+          SUBJECT LINE = COMMAND<br>
+          BODY = LEAVE BLANK<br><br>
+          USE QUICK COMMANDS BELOW OR TYPE FULL SUBJECT
+        </div>
+
+        <div class="command-input-wrap">
+          <span class="command-prefix">▶</span>
+          <input
+            type="text"
+            class="command-input"
+            id="command-input"
+            placeholder="TYPE COMMAND SUBJECT..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+
+        <button class="cmd-btn" onclick="sendCommand()">TRANSMIT COMMAND</button>
+
+        <hr class="cmd-divider">
+
+        <div class="quick-commands">
+          <button class="quick-btn" onclick="setCmd('APEX STATUS')">STATUS</button>
+          <button class="quick-btn" onclick="setCmd('APEX REBALANCE')">REBALANCE</button>
+          <button class="quick-btn" onclick="setCmd('APEX RESUME')">RESUME</button>
+          <button class="quick-btn" onclick="setCmd('APEX CASH 2000')">CASH $2K</button>
+          <button class="quick-btn" onclick="setCmd('APEX SELL TQQQ ALL')">SELL TQQQ</button>
+          <button class="quick-btn" onclick="setCmd('APEX SELL GDXJ ALL')">SELL GDXJ</button>
+        </div>
+
+        <button class="cmd-btn safe" onclick="setCmd('APEX STATUS'); sendCommand()">⬡ REQUEST STATUS NOW</button>
+
+        <hr class="cmd-divider">
+
+        <button class="cmd-btn override" onclick="showOverrideModal()">
+          ⚠ APEX OVERRIDE — LIQUIDATE ALL
+        </button>
+
+        <div class="loading" id="loading">
+          <span>TRANSMITTING</span>
+          <span class="loading-dots">
+            <span>▪</span><span>▪</span><span>▪</span>
+          </span>
+        </div>
+
+        <div class="response-area empty" id="response-area">
+          AWAITING COMMAND<span class="blink">_</span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- SAVANT DIRECTIVE PANEL -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">SAVANT DIRECTIVE</span>
+        <span class="panel-badge" id="directive-badge-header">—</span>
+      </div>
+      <div class="panel-body">
+        <div class="directive-display">
+          <div class="directive-badge STAND_DOWN" id="directive-badge">——</div>
+          <div class="directive-meta">
+            <div>REGIME: <span id="directive-regime">——</span></div>
+            <div>RISK: <span id="directive-risk">——</span></div>
+            <div>VIX: <span id="directive-vix">——</span></div>
+            <div>AS OF: <span id="directive-time">——</span></div>
+          </div>
+        </div>
+        <div class="memo-box" id="directive-memo">
+          AWAITING MORNING BRIEFING FROM SAVANT...
+        </div>
+      </div>
+    </div>
+
+    <!-- LOG PANEL -->
+    <div class="panel log-panel">
+      <div class="panel-header">
+        <span class="panel-title">COMMAND LOG</span>
+        <span class="panel-badge live">● ACTIVE</span>
+      </div>
+      <div class="panel-body">
+        <div class="log-scroll" id="log-scroll"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- OVERRIDE MODAL -->
+<div class="modal-overlay" id="override-modal">
+  <div class="modal">
+    <div class="modal-title">⚠ OVERRIDE CONFIRMATION REQUIRED</div>
+    <div class="modal-body">
+      APEX OVERRIDE will immediately:<br>
+      — LIQUIDATE ALL open positions at market price<br>
+      — HALT all new trades until APEX RESUME<br>
+      — Write override flag to Savant bridge<br><br>
+      THIS ACTION IS IRREVERSIBLE.<br>
+      Type <strong style="color:var(--red)">OVERRIDE</strong> to confirm execution.
+    </div>
+    <input
+      type="text"
+      class="modal-confirm-input"
+      id="override-confirm-input"
+      placeholder="TYPE OVERRIDE TO CONFIRM"
+      autocomplete="off"
+      oninput="checkOverrideConfirm()"
+    />
+    <div class="modal-btns">
+      <button class="modal-btn-cancel" onclick="hideOverrideModal()">ABORT</button>
+      <button class="modal-btn-execute" id="override-execute-btn" disabled onclick="executeOverride()">EXECUTE</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────────
+const COMMAND_ADDRESS = 'apex@coraemjen.resend.app';
+const MARSHALL_URL    = 'https://apex-command-production.up.railway.app';
+
+// ── STATE ─────────────────────────────────────────────────────
+const log_entries = [];
+
+// ── CLOCK ─────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
+  document.getElementById('clock').textContent = now;
+
+  const d   = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day = d.getDay();
+  const h   = d.getHours(), m = d.getMinutes();
+  const mins = h * 60 + m;
+  const isOpen = day >= 1 && day <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60;
+
+  const el = document.getElementById('market-status');
+  el.textContent = isOpen ? '● MARKET OPEN' : '○ MARKET CLOSED';
+  el.style.color = isOpen ? 'var(--green)' : 'var(--amber-dim)';
+}
+
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── LOGGING ───────────────────────────────────────────────────
+function addLog(msg, type = 'info') {
+  const now  = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
+  const entry = { time: now, msg, type };
+  log_entries.unshift(entry);
+  if (log_entries.length > 100) log_entries.pop();
+
+  const scroll = document.getElementById('log-scroll');
+  const line   = document.createElement('div');
+  line.className = 'log-line';
+  line.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${type}">${msg}</span>`;
+  scroll.insertBefore(line, scroll.firstChild);
+}
+
+// ── FETCH PORTFOLIO STATUS ────────────────────────────────────
+async function fetchStatus() {
+  try {
+    const r = await fetch(`${MARSHALL_URL}/health`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+
+    document.getElementById('sb-status').textContent = data.override ? 'OVERRIDE ACTIVE' : 'ONLINE';
+    document.getElementById('sb-status').className   = `value ${data.override ? 'red' : 'green'}`;
+
+    addLog('Health check OK', 'success');
+  } catch(e) {
+    addLog(`Health check failed: ${e.message}`, 'error');
+    document.getElementById('sb-status').textContent = 'UNREACHABLE';
+    document.getElementById('sb-status').className   = 'value red';
+  }
+}
+
+// ── UPDATE PORTFOLIO DISPLAY ──────────────────────────────────
+function updatePortfolioDisplay(statusText) {
+  if (!statusText) return;
+
+  // Parse equity
+  const equityMatch = statusText.match(/Total Value:\s+\$([0-9,]+\.\d+)/);
+  if (equityMatch) {
+    const equity = parseFloat(equityMatch[1].replace(',', ''));
+    document.getElementById('equity-display').textContent = '$' + equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    document.getElementById('sb-equity').textContent      = '$' + equity.toLocaleString('en-US', { minimumFractionDigits: 2 });
+
+    // Threshold bar — range $75k to $100k
+    const pct = Math.min(100, Math.max(0, ((equity - 75000) / 25000) * 100));
+    document.getElementById('threshold-fill').style.width = pct + '%';
+    document.getElementById('threshold-pct').textContent  = pct.toFixed(0) + '%';
+    document.getElementById('threshold-fill').style.background =
+      equity < 85000 ? 'var(--red)' :
+      equity < 90000 ? 'var(--amber)' :
+      'var(--amber)';
+  }
+
+  // Parse P&L
+  const plMatch = statusText.match(/Total P&L:\s+([+-]?\$[0-9,]+\.\d+)\s+\(([+-]?[\d.]+%)\)/);
+  if (plMatch) {
+    const isPos = plMatch[1].startsWith('+') || (!plMatch[1].startsWith('-'));
+    document.getElementById('equity-change').textContent  = plMatch[1] + ' (' + plMatch[2] + ') FROM START';
+    document.getElementById('equity-change').className    = 'equity-change ' + (isPos ? 'positive' : 'negative');
+    document.getElementById('sb-pl').textContent          = plMatch[1] + ' ' + plMatch[2];
+    document.getElementById('sb-pl').className            = 'value ' + (isPos ? 'green' : 'red');
+  }
+
+  // Parse cash
+  const cashMatch = statusText.match(/Cash:\s+\$([0-9,]+\.\d+)/);
+  if (cashMatch) {
+    document.getElementById('sb-cash').textContent = '$' + parseFloat(cashMatch[1].replace(',', '')).toLocaleString('en-US', { minimumFractionDigits: 2 });
+  }
+
+  // Parse positions
+  const posSection = statusText.match(/── POSITIONS ──[\s\S]*?(?=──|$)/);
+  const tbody = document.getElementById('positions-body');
+  if (posSection) {
+    const lines = posSection[0].split('\n').filter(l => l.trim().match(/^[A-Z]{1,5}\s/));
+    if (lines.length) {
+      tbody.innerHTML = lines.map(l => {
+        const parts = l.trim().split(/\s+/);
+        const ticker = parts[0];
+        const isPos  = l.includes('+');
+        const cls    = isPos ? 'pl-positive' : 'pl-negative';
+        return `<tr>
+          <td><span class="ticker-badge">${ticker}</span></td>
+          <td>${parts[1] || '—'}</td>
+          <td>${parts[4] || '—'}</td>
+          <td>—</td>
+          <td class="${cls}">${parts.find(p => p.startsWith('+') || (p.startsWith('$') && p.includes('-'))) || '—'}</td>
+          <td class="${cls}">${parts[parts.length - 1] || '—'}</td>
+        </tr>`;
+      }).join('');
+      document.getElementById('pos-count').textContent = lines.length + ' POSITION' + (lines.length !== 1 ? 'S' : '');
+    } else {
+      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--amber-dim);font-size:10px;letter-spacing:2px">NO OPEN POSITIONS</td></tr>';
+      document.getElementById('pos-count').textContent = '0 POSITIONS';
+    }
+  }
+
+  // Parse Savant directive
+  const directiveMatch = statusText.match(/── SAVANT DIRECTIVE ──[\s\S]*?(?=── SYSTEM|$)/);
+  if (directiveMatch) {
+    const section = directiveMatch[0];
+    const lines   = section.split('\n').filter(l => l.trim());
+
+    // First non-header line with content
+    const directiveLine = lines.find(l => !l.includes('──') && l.trim().length > 2);
+    if (directiveLine && !directiveLine.includes('Not available')) {
+      const parts = directiveLine.split('|');
+      if (parts[0]) {
+        const d = parts[0].trim();
+        const badge = document.getElementById('directive-badge');
+        badge.textContent  = d;
+        badge.className    = 'directive-badge ' + d.replace(/ /g, '_');
+        document.getElementById('directive-badge-header').textContent = d;
+      }
+      const regimeMatch = directiveLine.match(/Regime:\s*(\w+)/);
+      if (regimeMatch) document.getElementById('directive-regime').textContent = regimeMatch[1];
+    } else if (directiveLine?.includes('Not available')) {
+      document.getElementById('directive-badge').textContent = 'NOT AVAILABLE';
+      document.getElementById('directive-memo').textContent  = 'GIST BRIDGE NOT YET CONFIGURED.\nRUN SAVANT AT 9 AM TO INITIALIZE.';
+    }
+  }
+}
+
+// ── SEND COMMAND VIA MAILTO ───────────────────────────────────
+function sendCommand() {
+  const input   = document.getElementById('command-input');
+  const subject = input.value.trim().toUpperCase();
+
+  if (!subject) { showToast('ENTER A COMMAND FIRST', 'error'); return; }
+  if (!subject.startsWith('APEX')) { showToast('COMMANDS MUST START WITH APEX', 'error'); return; }
+
+  // Show loading
+  document.getElementById('loading').classList.add('active');
+  document.getElementById('response-area').textContent = 'TRANSMITTING TO APEX COMMAND...';
+  document.getElementById('response-area').classList.remove('empty');
+
+  addLog(`CMD → ${subject}`, 'warn');
+
+  // Open mailto — sends via user's email client to command address
+  const mailto = `mailto:${COMMAND_ADDRESS}?subject=${encodeURIComponent(subject)}`;
+  window.open(mailto, '_blank');
+
+  setTimeout(() => {
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('response-area').textContent =
+      `COMMAND TRANSMITTED: ${subject}\n\nEmail opened to: ${COMMAND_ADDRESS}\nSend the email to execute.\n\nResponse will arrive in your inbox within 60 seconds.`;
+    addLog(`TRANSMITTED: ${subject}`, 'success');
+    showToast('EMAIL OPENED — SEND TO EXECUTE', 'success');
+  }, 800);
+
+  input.value = '';
+}
+
+function setCmd(cmd) {
+  document.getElementById('command-input').value = cmd;
+  document.getElementById('command-input').focus();
+}
+
+// Enter key support
+document.getElementById('command-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendCommand();
+});
+
+// ── OVERRIDE MODAL ────────────────────────────────────────────
+function showOverrideModal() {
+  document.getElementById('override-modal').classList.add('active');
+  document.getElementById('override-confirm-input').value = '';
+  document.getElementById('override-execute-btn').disabled = true;
+  setTimeout(() => document.getElementById('override-confirm-input').focus(), 100);
+}
+
+function hideOverrideModal() {
+  document.getElementById('override-modal').classList.remove('active');
+}
+
+function checkOverrideConfirm() {
+  const val = document.getElementById('override-confirm-input').value.trim().toUpperCase();
+  document.getElementById('override-execute-btn').disabled = val !== 'OVERRIDE';
+}
+
+function executeOverride() {
+  hideOverrideModal();
+  setCmd('APEX OVERRIDE');
+  sendCommand();
+  addLog('⚠ OVERRIDE EXECUTED', 'error');
+}
+
+// ── TOAST ─────────────────────────────────────────────────────
+function showToast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className   = 'toast ' + type + ' show';
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── AUTO REFRESH STATUS ───────────────────────────────────────
+async function autoStatus() {
+  try {
+    addLog('AUTO-STATUS REQUEST', 'info');
+    setCmd('APEX STATUS');
+    // Just do health check on refresh — full status via email command
+    await fetchStatus();
+  } catch(e) {
+    addLog(`Auto-status error: ${e.message}`, 'error');
+  }
+}
+
+// ── BOOT ──────────────────────────────────────────────────────
+addLog('MARSHALL COMMAND LAYER INITIALIZED', 'success');
+addLog(`COMMAND ADDRESS: ${COMMAND_ADDRESS}`, 'info');
+addLog('SEND APEX STATUS FOR PORTFOLIO SNAPSHOT', 'info');
+
+fetchStatus();
+setInterval(fetchStatus, 60000); // health check every 60s
+</script>
+</body>
+</html>
