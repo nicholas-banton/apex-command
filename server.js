@@ -939,6 +939,60 @@ async function handleWebhook(rawBody, headers) {
 // HTTP SERVER
 // ══════════════════════════════════════════════════════════════
 function startServer() {
+  // ── Live data cache (avoids hammering Alpaca on every poll) ──
+  let dataCache = { payload: null, fetchedAt: 0 };
+
+  async function buildLiveData() {
+    const now = Date.now();
+    if (dataCache.payload && (now - dataCache.fetchedAt) < 60 * 1000) return dataCache.payload;
+    try {
+      const [account, positions, savant] = await Promise.all([
+        getAccount(), getPositions(), getSavantDirective(),
+      ]);
+      // Today's orders
+      let orders = [];
+      try {
+        const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+        const todayStart = new Date(et.getFullYear(), et.getMonth(), et.getDate());
+        const r = await alpacaCall(`/v2/orders?status=all&after=${todayStart.toISOString()}&limit=50`);
+        if (r.status === 200) orders = r.body;
+      } catch(e) { /* non-fatal */ }
+
+      const equity = account ? parseFloat(account.equity) : 0;
+      const cash   = account ? parseFloat(account.cash)   : 0;
+      const bp     = account ? parseFloat(account.buying_power) : 0;
+      const pnl    = equity - 100000;
+      const pnlPct = (pnl / 100000) * 100;
+      const etNowObj = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const etMinsNow = etNowObj.getHours() * 60 + etNowObj.getMinutes();
+
+      const payload = {
+        equity, cash, bp, pnl, pnlPct,
+        positions,
+        orders,
+        savant,
+        overrideActive: state.overrideActive,
+        overrideTime:   state.overrideTime,
+        marketOpen:     isMarketOpen(),
+        commandCount:   state.rateLimitWindow.length,
+        commandMax:     CONFIG.RATE_LIMIT_MAX,
+        commandLog:     state.commandLog.slice(-60).reverse(),
+        bridgeOk:       !!CONFIG.GITHUB_GIST_ID,
+        alpacaOk:       !!CONFIG.ALPACA_KEY_ID,
+        resendOk:       !!CONFIG.RESEND_KEY,
+        etTime: etNowObj.toLocaleTimeString("en-US", { hour12: false }),
+        etDate: etNowObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }),
+        etMins: etMinsNow,
+        mode: CONFIG.ALPACA_BASE_URL.includes("paper") ? "PAPER" : "LIVE",
+      };
+      dataCache = { payload, fetchedAt: now };
+      return payload;
+    } catch(e) {
+      log(`buildLiveData error: ${e.message}`, "ERROR");
+      return dataCache.payload || null;
+    }
+  }
+
   const server = http.createServer(async (req, res) => {
 
     // ── WEBHOOK ENDPOINT ──────────────────────────────────────
@@ -967,41 +1021,22 @@ function startServer() {
       return;
     }
 
+    // ── LIVE DATA API ──────────────────────────────────────────
+    if (req.method === "GET" && req.url === "/api/data") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      try {
+        const data = await buildLiveData();
+        res.end(JSON.stringify(data || { error: "No data available" }));
+      } catch(e) {
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
     // ── DASHBOARD ─────────────────────────────────────────────
     if (req.method === "GET" && (req.url === "/" || req.url === "/dashboard")) {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(`<!DOCTYPE html><html><head><title>Marshall</title><meta http-equiv="refresh" content="30">
-      <style>
-        body{background:#060610;color:#00ffaa;font-family:monospace;padding:24px;max-width:760px;margin:0 auto;}
-        h1{letter-spacing:4px;font-size:18px;border-bottom:1px solid #1a1a30;padding-bottom:12px;}
-        table{width:100%;border-collapse:collapse;margin:16px 0;}
-        td{padding:8px 12px;border:1px solid #1a1a30;font-size:12px;}
-        .k{color:#f5c842;} .g{color:#00ffaa;} .r{color:#ff3355;} .y{color:#f5a623;}
-        .log{background:#08081a;padding:16px;border-radius:4px;font-size:10px;line-height:1.8;max-height:400px;overflow-y:auto;margin-top:16px;}
-        .cmd{background:#0a0a20;padding:12px;border-radius:4px;font-size:11px;margin-top:12px;border:1px solid #1a1a30;}
-      </style></head>
-      <body>
-        <h1>⚔ MARSHALL COMMAND LAYER</h1>
-        <table>
-          <tr><td class="k">STATUS</td><td class="${state.overrideActive ? "r" : "g"}">${state.overrideActive ? "⛔ OVERRIDE ACTIVE" : "✅ MONITORING"}</td></tr>
-          <tr><td class="k">COMMAND ADDRESS</td><td>apex@coraemjen.resend.app</td></tr>
-          <tr><td class="k">AUTHORIZED SENDER</td><td>${CONFIG.AUTHORIZED_SENDER}</td></tr>
-          <tr><td class="k">MARKET</td><td class="${isMarketOpen() ? "g" : "y"}">${isMarketOpen() ? "OPEN" : "CLOSED"}</td></tr>
-          <tr><td class="k">RATE LIMIT</td><td>${state.rateLimitWindow.length}/${CONFIG.RATE_LIMIT_MAX} commands this hour</td></tr>
-          <tr><td class="k">ET TIME</td><td>${etNow().toLocaleTimeString()}</td></tr>
-          <tr><td class="k">ALPACA</td><td class="${CONFIG.ALPACA_KEY_ID ? "g" : "r"}">${CONFIG.ALPACA_KEY_ID ? "✓ Connected" : "✗ Not configured"}</td></tr>
-          <tr><td class="k">RESEND</td><td class="${CONFIG.RESEND_KEY ? "g" : "r"}">${CONFIG.RESEND_KEY ? "✓ Connected" : "✗ Not configured"}</td></tr>
-          <tr><td class="k">GIST BRIDGE</td><td class="${CONFIG.GITHUB_GIST_ID ? "g" : "y"}">${CONFIG.GITHUB_GIST_ID ? "✓ Connected" : "⚠ Not set"}</td></tr>
-        </table>
-        <div class="cmd">
-          <strong style="color:#f5c842">COMMANDS:</strong><br>
-          Send email to <strong>apex@coraemjen.resend.app</strong> with subject:<br><br>
-          APEX STATUS · APEX OVERRIDE · APEX RESUME · APEX REBALANCE<br>
-          APEX BUY [TICKER] [AMOUNT] · APEX SELL [TICKER] [AMOUNT|ALL]<br>
-          APEX CASH [AMOUNT] [YIELD] · Add CONFIRM to override limits
-        </div>
-        <div class="log">${state.commandLog.slice(-30).reverse().map(l => `<div>${l}</div>`).join("")}</div>
-      </body></html>`);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(MARSHALL_DASHBOARD_HTML);
       return;
     }
 
@@ -1011,6 +1046,522 @@ function startServer() {
 
   server.listen(CONFIG.PORT, () => log(`⚔ Marshall Command Layer running on port ${CONFIG.PORT}`));
 }
+
+// ── MARSHALL DASHBOARD HTML ──────────────────────────────────
+const MARSHALL_DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MARSHALL // APEX COMMAND LAYER</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=VT323&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-font-smoothing:antialiased}
+body{background:#0a0800;color:#c8a84b;font-family:'Share Tech Mono',monospace;min-height:100vh;overflow-x:hidden}
+@keyframes scanMove{0%{top:-3px}100%{top:100%}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes ping{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(2.2);opacity:0}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
+@keyframes tickerScroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:#3a2e10}
+.scanline{pointer-events:none;position:fixed;left:0;right:0;height:2px;z-index:9999;opacity:0.06;background:linear-gradient(180deg,transparent,#c8a84b,transparent);animation:scanMove 10s linear infinite}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(200,168,75,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(200,168,75,0.03) 1px,transparent 1px);
+  background-size:40px 40px}
+.card{background:#0e0c05;border:1px solid #3a2e10;border-radius:2px;overflow:hidden;margin-bottom:10px;position:relative;z-index:1}
+.ch{padding:8px 13px;background:#120f04;border-bottom:1px solid #3a2e10;font-size:9px;color:#c8a84b66;letter-spacing:3px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none}
+.ch:hover{background:#1a1506}
+.ct{font-size:11px;color:#3a2e10;transition:transform 0.2s;display:inline-block}
+.card.collapsed .ct{transform:rotate(-90deg)}
+.card.collapsed .cb{display:none}
+.btn-cmd{background:transparent;border:1px solid #3a2e10;color:#c8a84b88;padding:6px 14px;font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:2px;cursor:pointer;transition:all 0.15s;border-radius:2px;width:100%}
+.btn-cmd:hover{background:#c8a84b18;border-color:#c8a84b88;color:#c8a84b}
+.btn-override{background:#ff333311;border-color:#ff333388;color:#ff3333cc}
+.btn-override:hover{background:#ff333333;border-color:#ff3333;color:#ff3333}
+.btn-primary{background:#c8a84b18;border-color:#c8a84b88;color:#c8a84b}
+.btn-primary:hover{background:#c8a84b33;border-color:#c8a84b}
+.stat-lbl{font-size:8px;color:#c8a84b44;letter-spacing:3px;margin-bottom:4px}
+.stat-val{font-family:'Orbitron',monospace;font-size:18px;letter-spacing:2px;color:#c8a84b}
+.pos-row{display:grid;grid-template-columns:70px 80px 75px 80px 1fr;gap:6px;align-items:center;padding:8px 13px;border-bottom:1px solid #1a1506;font-size:10px}
+.pos-row:last-child{border-bottom:none}
+.ll{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #150e00}
+.lt{color:#c8a84b33;font-size:9px;flex-shrink:0;width:120px}
+.lm{font-size:10px;line-height:1.5}
+.ld{position:relative;display:inline-block;width:7px;height:7px}
+.ldi{position:absolute;inset:0;border-radius:50%}
+.ldr{position:absolute;inset:0;border-radius:50%;animation:ping 2s infinite}
+.sp{display:inline-block;width:12px;height:12px;border:2px solid #3a2e10;border-top-color:#c8a84b;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px}
+input[type=text]{background:#06050100;border:1px solid #3a2e10;color:#c8a84b;padding:9px 12px;font-family:'Share Tech Mono',monospace;font-size:11px;letter-spacing:2px;width:100%;outline:none;border-radius:2px}
+input[type=text]:focus{border-color:#c8a84b88;background:#120f04}
+input[type=text]::placeholder{color:#3a2e10}
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="grid-bg"></div>
+
+<!-- TICKER -->
+<div style="background:#08070000;border-bottom:1px solid #c8a84b18;padding:4px 0;overflow:hidden;position:relative;z-index:1">
+  <div style="overflow:hidden;white-space:nowrap">
+    <div id="ticker-inner" style="display:inline-flex;animation:tickerScroll 45s linear infinite">
+      <span style="padding:0 24px;font-size:9px;color:#3a2e10">LOADING MARKET DATA...</span>
+    </div>
+  </div>
+</div>
+
+<!-- HEADER -->
+<div style="position:relative;z-index:1;border-bottom:1px solid #c8a84b33;padding:14px 22px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+  <div style="height:2px;position:absolute;top:0;left:0;right:0;background:linear-gradient(90deg,transparent,#c8a84b,#aa8833,#c8a84b,transparent)"></div>
+  <div>
+    <div style="font-family:'Orbitron',monospace;font-size:22px;font-weight:900;letter-spacing:6px;color:#c8a84b">MARSHALL</div>
+    <div style="font-size:9px;color:#c8a84b44;letter-spacing:3px;margin-top:3px">APEX COMMAND LAYER // GENERAL G.C. MARSHALL PROTOCOL</div>
+  </div>
+  <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+    <div style="text-align:right">
+      <div id="hdr-clock" style="font-family:'Orbitron',monospace;font-size:16px;color:#c8a84b;letter-spacing:3px">—</div>
+      <div style="font-size:9px;color:#c8a84b44;margin-top:2px">EASTERN TIME // PAPER MODE</div>
+      <div id="hdr-market" style="font-size:9px;color:#3a2e10;margin-top:2px;letter-spacing:2px">◇ MARKET CLOSED</div>
+    </div>
+  </div>
+</div>
+
+<!-- SYSTEM STATUS BAR -->
+<div id="status-bar" style="position:relative;z-index:1;display:flex;border-bottom:1px solid #3a2e10;flex-wrap:wrap">
+  <div style="flex:1;min-width:120px;padding:8px 14px;border-right:1px solid #3a2e10;text-align:center">
+    <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:3px">PORTFOLIO VALUE</div>
+    <div id="sb-equity" style="font-family:'Orbitron',monospace;font-size:14px;color:#c8a84b;letter-spacing:2px">--</div>
+  </div>
+  <div style="flex:1;min-width:120px;padding:8px 14px;border-right:1px solid #3a2e10;text-align:center">
+    <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:3px">TOTAL P&L</div>
+    <div id="sb-pnl" style="font-family:'Orbitron',monospace;font-size:14px;color:#3a2e10;letter-spacing:2px">--</div>
+  </div>
+  <div style="flex:1;min-width:120px;padding:8px 14px;border-right:1px solid #3a2e10;text-align:center">
+    <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:3px">CASH AVAILABLE</div>
+    <div id="sb-cash" style="font-family:'Orbitron',monospace;font-size:14px;color:#c8a84b;letter-spacing:2px">--</div>
+  </div>
+  <div style="flex:1;min-width:120px;padding:8px 14px;border-right:1px solid #3a2e10;text-align:center">
+    <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:3px">VIX LEVEL</div>
+    <div id="sb-vix" style="font-family:'Orbitron',monospace;font-size:14px;color:#3a2e10;letter-spacing:2px">--</div>
+  </div>
+  <div style="flex:1;min-width:160px;padding:8px 14px;text-align:center">
+    <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:3px">SYSTEM STATUS</div>
+    <div id="sb-status" style="font-family:'Orbitron',monospace;font-size:11px;letter-spacing:2px;color:#ff3333">CONNECTING</div>
+  </div>
+</div>
+
+<!-- MAIN GRID -->
+<div style="position:relative;z-index:1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;padding:16px;gap:12px">
+
+  <!-- LEFT COLUMN -->
+  <div>
+    <!-- Portfolio panel -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>PORTFOLIO // ALPACA PAPER</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="ld"><span class="ldr" id="live-ring" style="background:#3a2e10"></span><span class="ldi" id="live-dot" style="background:#3a2e10"></span></span>
+          <span id="live-lbl" style="font-size:9px;color:#3a2e10;letter-spacing:2px">OFFLINE</span>
+          <span class="ct">▼</span>
+        </div>
+      </div>
+      <div class="cb" style="padding:16px">
+        <div id="portfolio-equity" style="font-family:'VT323',monospace;font-size:52px;color:#c8a84b;letter-spacing:2px;line-height:1">$--,---.--</div>
+        <div id="portfolio-pnl" style="font-size:11px;color:#3a2e10;margin-top:4px;letter-spacing:2px">P&L: --</div>
+        <div style="margin-top:14px">
+          <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:5px">INTERVENTION THRESHOLD — $85,000</div>
+          <div style="background:#150e00;height:4px;border-radius:1px;position:relative;overflow:hidden">
+            <div id="thresh-bar" style="height:100%;background:linear-gradient(90deg,#ff3333,#f5a623,#c8a84b);transition:width 0.5s;width:50%"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:8px;color:#3a2e10;margin-top:4px">
+            <span>$75K<br>STOP</span><span>$80K<br>PRESERVE</span><span>$85K --<br>INTERVENE</span><span>$90K<br>CONSERV</span><span>$100K<br>START</span>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px">
+          <div style="background:#0a0900;border:1px solid #3a2e10;padding:8px;border-radius:2px"><div class="stat-lbl">BUYING POWER</div><div id="p-bp" style="font-family:'Orbitron',monospace;font-size:13px;color:#c8a84b">—</div></div>
+          <div style="background:#0a0900;border:1px solid #3a2e10;padding:8px;border-radius:2px"><div class="stat-lbl">OPEN P&L</div><div id="p-openpl" style="font-family:'Orbitron',monospace;font-size:13px;color:#3a2e10">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Savant Directive -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>SAVANT DIRECTIVE</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="directive-badge" style="font-size:9px;padding:1px 7px;border:1px solid #3a2e10;color:#3a2e10">--</span>
+          <span class="ct">▼</span>
+        </div>
+      </div>
+      <div class="cb" style="padding:14px" id="savant-panel">
+        <div style="font-size:10px;color:#3a2e10;letter-spacing:1px">AWAITING MORNING BRIEFING FROM SAVANT...</div>
+      </div>
+    </div>
+
+    <!-- Open positions -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>OPEN POSITIONS</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="pos-badge" style="font-size:9px;padding:1px 7px;border:1px solid #3a2e10;color:#3a2e10">0 POSITIONS</span>
+          <span class="ct">▼</span>
+        </div>
+      </div>
+      <div class="cb">
+        <div class="pos-row" style="font-size:8px;color:#c8a84b44;letter-spacing:2px;padding:6px 13px;background:#0a0900">
+          <span>TICKER</span><span>SHARES</span><span>PRICE</span><span>VALUE</span><span>P&L</span>
+        </div>
+        <div id="positions-list">
+          <div style="padding:12px 13px;font-size:10px;color:#3a2e10"><span class="sp"></span>LOADING...</div>
+        </div>
+        <div id="cash-pos-row"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MIDDLE COLUMN -->
+  <div>
+    <!-- Today's Orders -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>TODAY'S ORDERS</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="orders-badge" style="font-size:9px;color:#3a2e10">0 ORDERS</span>
+          <span class="ct">▼</span>
+        </div>
+      </div>
+      <div class="cb">
+        <div style="display:grid;grid-template-columns:60px 50px 65px 90px 1fr;gap:4px;padding:6px 13px;font-size:8px;color:#c8a84b44;letter-spacing:1px;background:#0a0900">
+          <span>SYMBOL</span><span>SIDE</span><span>STATUS</span><span>AMOUNT</span><span>TIME</span>
+        </div>
+        <div id="orders-list">
+          <div style="padding:12px 13px;font-size:10px;color:#3a2e10">NO ORDERS TODAY</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Command Log -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>COMMAND LOG</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="log-badge" style="font-size:9px;color:#c8a84b44;padding:1px 7px;border:1px solid #3a2e10">ACTIVE</span>
+          <span class="ct">▼</span>
+        </div>
+      </div>
+      <div class="cb">
+        <div id="cmd-log" style="padding:10px 13px;max-height:360px;overflow-y:auto"></div>
+      </div>
+    </div>
+
+    <!-- System status -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>SYSTEM STATUS</span>
+        <div style="display:flex;align-items:center;gap:8px"><span style="color:#3a2e10;font-size:9px">connections</span><span class="ct">▼</span></div>
+      </div>
+      <div class="cb" style="padding:12px">
+        <div id="sys-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"></div>
+        <div style="margin-top:10px;font-size:9px;color:#c8a84b44;letter-spacing:2px;border-top:1px solid #3a2e10;padding-top:10px">
+          <div style="margin-bottom:4px">COMMAND ADDRESS</div>
+          <div style="color:#c8a84b88;font-size:10px">apex@coraemjen.resend.app</div>
+          <div style="margin-top:6px;color:#c8a84b44">AUTHORIZED: nicholas.banton@gmail.com</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div>
+    <!-- Command Input -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>COMMAND INPUT</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="cmd-mode" style="font-size:9px;color:#c8a84b88;padding:1px 7px;border:1px solid #c8a84b33">MANUAL</span>
+          <span class="ct">▼</span>
+        </div>
+      </div>
+      <div class="cb" style="padding:14px">
+        <div style="font-size:9px;color:#c8a84b44;line-height:2;margin-bottom:12px">
+          SEND EMAIL TO:<br>
+          <span style="color:#c8a84b88">apex@coraemjen.resend.app</span><br>
+          SUBJECT LINE = COMMAND<br>
+          BODY = LEAVE BLANK
+        </div>
+        <div style="font-size:8px;color:#c8a84b44;letter-spacing:2px;margin-bottom:6px">USE QUICK COMMANDS BELOW OR TYPE FULL SUBJECT</div>
+        <input type="text" id="cmd-input" placeholder="TYPE COMMAND SUBJECT..." style="margin-bottom:10px">
+        <button class="btn-cmd btn-primary" onclick="transmitCommand()" style="margin-bottom:12px;font-size:11px;letter-spacing:3px;padding:9px">▶ TRANSMIT COMMAND</button>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+          <button class="btn-cmd" onclick="setCmd('APEX STATUS')">STATUS</button>
+          <button class="btn-cmd" onclick="setCmd('APEX REBALANCE')">REBALANCE</button>
+          <button class="btn-cmd" onclick="setCmd('APEX RESUME')">RESUME</button>
+          <button class="btn-cmd" onclick="setCmd('APEX CASH 20K YIELD')">CASH $2K</button>
+          <button class="btn-cmd" onclick="setCmd('APEX SELL TQQQ ALL')">SELL TQQQ</button>
+          <button class="btn-cmd" onclick="setCmd('APEX SELL SOXL ALL')">SELL SOXL</button>
+        </div>
+
+        <button class="btn-cmd btn-primary" onclick="requestStatusNow()" style="margin-bottom:10px;letter-spacing:2px">◈ REQUEST STATUS NOW</button>
+
+        <div id="override-confirm" style="display:none;padding:10px;background:#150808;border:1px solid #ff333344;border-radius:2px;margin-bottom:8px">
+          <div style="font-size:9px;color:#ff3333;margin-bottom:6px;letter-spacing:2px">TYPE "OVERRIDE" TO CONFIRM LIQUIDATION</div>
+          <input type="text" id="override-input" placeholder="OVERRIDE" style="margin-bottom:6px;border-color:#ff333388">
+          <button class="btn-cmd btn-override" onclick="confirmOverride()" style="font-size:10px">CONFIRM LIQUIDATE ALL</button>
+          <button class="btn-cmd" onclick="cancelOverride()" style="margin-top:4px;font-size:9px">CANCEL</button>
+        </div>
+
+        <button class="btn-cmd btn-override" onclick="showOverride()" style="letter-spacing:2px">▲ APEX OVERRIDE — LIQUIDATE ALL</button>
+
+        <div id="cmd-output" style="margin-top:12px;padding:10px;background:#08070000;border:1px solid #3a2e10;border-radius:2px;font-size:9px;color:#c8a84b44;min-height:60px;font-family:'Share Tech Mono',monospace;line-height:1.7">
+          AWAITING COMMAND_
+        </div>
+      </div>
+    </div>
+
+    <!-- Rate limit / session -->
+    <div class="card">
+      <div class="ch" onclick="toggleCard(this)">
+        <span>RATE LIMIT // SESSION</span>
+        <div style="display:flex;align-items:center;gap:8px"><span id="rl-badge" style="font-size:9px;color:#3a2e10">0/10</span><span class="ct">▼</span></div>
+      </div>
+      <div class="cb" style="padding:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div style="background:#0a0900;border:1px solid #3a2e10;padding:8px;border-radius:2px"><div class="stat-lbl">COMMANDS THIS HOUR</div><div id="rl-count" style="font-family:'Orbitron',monospace;font-size:16px;color:#c8a84b">0</div></div>
+          <div style="background:#0a0900;border:1px solid #3a2e10;padding:8px;border-radius:2px"><div class="stat-lbl">LIMIT</div><div style="font-family:'Orbitron',monospace;font-size:16px;color:#3a2e10">10</div></div>
+        </div>
+        <div style="background:#150e00;height:4px;border-radius:1px;overflow:hidden;margin-bottom:5px">
+          <div id="rl-bar" style="height:100%;background:#c8a84b;transition:width 0.5s;width:0%"></div>
+        </div>
+        <div style="font-size:9px;color:#3a2e10;margin-top:4px">WINDOW RESETS EVERY 60 MINUTES</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="position:relative;z-index:1;border-top:1px solid #c8a84b18;padding:6px 22px;display:flex;justify-content:space-between;font-size:8px;color:#3a2e10">
+  <span>◈ MARSHALL COMMAND LAYER // APEX TRADING SYSTEM // PAPER MODE</span>
+  <span id="footer-time">—</span>
+</div>
+
+<script>
+let lastData = null;
+
+function toggleCard(h){ h.closest('.card').classList.toggle('collapsed'); }
+
+const fmt=(n,d=2)=>'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtN=(n,d=2)=>(n>=0?'+':'-')+fmt(n,d);
+const pct=(n,d=2)=>(n>=0?'+':'')+n.toFixed(d)+'%';
+const col=(n)=>n>=0?'#c8a84b':'#ff3333';
+
+function marketCountdown(etMins){
+  const open=9*60+30,close=16*60;
+  const day=new Date().getDay();
+  if(day<1||day>5) return'CLOSED (WEEKEND)';
+  if(etMins<open){const m=open-etMins;return\`OPENS IN \${Math.floor(m/60)}h \${m%60}m\`;}
+  if(etMins>=close) return'CLOSED (AFTER HOURS)';
+  const m=close-etMins;return\`OPEN — CLOSES IN \${Math.floor(m/60)}h \${m%60}m\`;
+}
+
+async function fetchData(){
+  try{
+    const r=await fetch('/api/data');
+    const d=await r.json();
+    if(d.error) throw new Error(d.error);
+    lastData=d;
+    renderAll(d);
+    document.getElementById('sb-status').textContent='ONLINE';
+    document.getElementById('sb-status').style.color='#c8a84b';
+    document.getElementById('live-ring').style.background='#c8a84b';
+    document.getElementById('live-dot').style.background='#c8a84b';
+    document.getElementById('live-lbl').textContent='LIVE';
+    document.getElementById('live-lbl').style.color='#c8a84b88';
+  }catch(e){
+    document.getElementById('sb-status').textContent='UNREACHABLE';
+    document.getElementById('sb-status').style.color='#ff3333';
+    document.getElementById('live-lbl').textContent='OFFLINE';
+    document.getElementById('cmd-output').textContent='ERROR: '+e.message;
+    console.error(e);
+  }
+}
+
+function renderAll(d){
+  const{equity,cash,bp,pnl,pnlPct,positions,orders,savant,overrideActive,commandLog,
+        marketOpen,commandCount,commandMax,etTime,etDate,etMins,mode,bridgeOk,alpacaOk,resendOk}=d;
+
+  // TICKER — build from positions + key stats
+  const items=[
+    \`<span style="display:inline-flex;align-items:center;gap:8px;padding:0 22px;font-size:9px"><span style="color:#c8a84b66;font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px">EQUITY</span><span>\${fmt(equity)}</span><span style="color:#3a2e10;margin-left:4px">│</span></span>\`,
+    \`<span style="display:inline-flex;align-items:center;gap:8px;padding:0 22px;font-size:9px"><span style="color:#c8a84b66;font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px">P&L</span><span style="color:\${col(pnl)}">\${fmtN(pnl)} (\${pct(pnlPct)})</span><span style="color:#3a2e10;margin-left:4px">│</span></span>\`,
+    \`<span style="display:inline-flex;align-items:center;gap:8px;padding:0 22px;font-size:9px"><span style="color:#c8a84b66;font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px">CASH</span><span>\${fmt(cash)}</span><span style="color:#3a2e10;margin-left:4px">│</span></span>\`,
+    \`<span style="display:inline-flex;align-items:center;gap:8px;padding:0 22px;font-size:9px"><span style="color:#c8a84b66;font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px">MARKET</span><span style="color:\${marketOpen?'#c8a84b':'#3a2e10'}">\${marketOpen?'OPEN':'CLOSED'}</span><span style="color:#3a2e10;margin-left:4px">│</span></span>\`,
+    ...(positions||[]).map(p=>{const pl=parseFloat(p.unrealized_pl);return\`<span style="display:inline-flex;align-items:center;gap:7px;padding:0 22px;font-size:9px"><span style="color:#c8a84b66;font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px">\${p.symbol}</span><span>\${fmt(parseFloat(p.current_price))}</span><span style="color:\${col(pl)}">\${pl>=0?'▲':'▼'} \${(Math.abs(parseFloat(p.unrealized_plpc))*100).toFixed(2)}%</span><span style="color:#3a2e10;margin-left:4px">│</span></span>\`;}),
+    \`<span style="display:inline-flex;align-items:center;gap:8px;padding:0 22px;font-size:9px"><span style="color:#c8a84b66;font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px">OVERRIDE</span><span style="color:\${overrideActive?'#ff3333':'#3a2e10'}">\${overrideActive?'ACTIVE':'INACTIVE'}</span><span style="color:#3a2e10;margin-left:4px">│</span></span>\`,
+  ];
+  document.getElementById('ticker-inner').innerHTML=items.join('')+items.join('');
+
+  // HEADER
+  document.getElementById('hdr-clock').textContent=etTime;
+  document.getElementById('hdr-market').textContent=(marketOpen?'◈ MARKET OPEN':'◇ MARKET CLOSED')+' // '+marketCountdown(etMins);
+  document.getElementById('hdr-market').style.color=marketOpen?'#c8a84b88':'#3a2e10';
+  document.getElementById('footer-time').textContent=etDate+' '+etTime+' ET · auto-refresh 30s';
+
+  // STATUS BAR
+  document.getElementById('sb-equity').textContent=fmt(equity);
+  document.getElementById('sb-pnl').textContent=fmtN(pnl)+' ('+pct(pnlPct)+')';
+  document.getElementById('sb-pnl').style.color=col(pnl);
+  document.getElementById('sb-cash').textContent=fmt(cash);
+  document.getElementById('sb-vix').textContent=savant?.vix?savant.vix.toFixed(1):'--';
+  document.getElementById('sb-status').textContent=overrideActive?'OVERRIDE ACTIVE':(marketOpen?'MONITORING':'STANDBY');
+  document.getElementById('sb-status').style.color=overrideActive?'#ff3333':marketOpen?'#c8a84b':'#888';
+
+  // PORTFOLIO
+  document.getElementById('portfolio-equity').textContent=fmt(equity);
+  document.getElementById('portfolio-pnl').textContent='P&L: '+fmtN(pnl)+' ('+pct(pnlPct)+')';
+  document.getElementById('portfolio-pnl').style.color=col(pnl);
+  document.getElementById('p-bp').textContent=fmt(bp);
+  const openPL=(positions||[]).reduce((s,p)=>s+parseFloat(p.unrealized_pl),0);
+  document.getElementById('p-openpl').textContent=fmtN(openPL);
+  document.getElementById('p-openpl').style.color=col(openPL);
+  const threshPct=Math.min(100,Math.max(0,((equity-75000)/25000)*100));
+  const threshColor=equity<85000?'#ff3333':equity<90000?'#f5a623':'#c8a84b';
+  document.getElementById('thresh-bar').style.width=threshPct+'%';
+
+  // SAVANT DIRECTIVE
+  if(savant){
+    document.getElementById('directive-badge').textContent=savant.directive||'--';
+    document.getElementById('directive-badge').style.color=savant.standDown?'#ff3333':savant.directive==='FULL_DEPLOY'?'#c8a84b':'#f5a623';
+    document.getElementById('directive-badge').style.borderColor=savant.standDown?'#ff333366':'#c8a84b44';
+    document.getElementById('savant-panel').innerHTML=\`
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:12px">
+        <div><div class="stat-lbl">DIRECTIVE</div><div style="font-family:'Orbitron',monospace;font-size:14px;color:\${savant.standDown?'#ff3333':'#c8a84b'}">\${savant.directive||'—'}</div></div>
+        <div><div class="stat-lbl">REGIME</div><div style="font-family:'Orbitron',monospace;font-size:13px;color:#c8a84b88">\${savant.regime||'—'}</div></div>
+        <div><div class="stat-lbl">RISK LEVEL</div><div style="font-family:'Orbitron',monospace;font-size:14px;color:#c8a84b88">\${savant.riskLevel||'—'}</div></div>
+        <div><div class="stat-lbl">VIX AT BRIEF</div><div style="font-family:'Orbitron',monospace;font-size:14px;color:#c8a84b88">\${savant.vix?.toFixed(1)||'—'}</div></div>
+      </div>
+      \${savant.tqqq_max_alloc?\`<div style="margin-bottom:10px"><div class="stat-lbl">TQQQ MAX ALLOC</div><div style="font-family:'Orbitron',monospace;font-size:16px;color:#f5c842">\${(savant.tqqq_max_alloc*100).toFixed(0)}%</div></div>\`:''}
+      \${savant.memo?\`<div style="font-size:10px;color:#c8a84b66;line-height:1.8;padding:10px;background:#06050100;border:1px solid #3a2e10;border-radius:2px">\${savant.memo}</div>\`:''}
+      <div style="font-size:9px;color:#3a2e10;margin-top:8px">AS OF: \${savant.timestamp?new Date(savant.timestamp).toLocaleString('en-US',{timeZone:'America/New_York'}):'—'}</div>
+    \`;
+  } else {
+    document.getElementById('directive-badge').textContent='NO BRIDGE';
+    document.getElementById('savant-panel').innerHTML=\`<div style="font-size:10px;color:#3a2e10;line-height:1.8">Bridge not initialized.<br>Set GITHUB_GIST_ID after Savant 9AM run.</div>\`;
+  }
+
+  // POSITIONS
+  const posCount=(positions||[]).length;
+  document.getElementById('pos-badge').textContent=posCount+' POSITION'+(posCount!==1?'S':'');
+  document.getElementById('positions-list').innerHTML=posCount>0
+    ?positions.map(p=>{
+        const pl=parseFloat(p.unrealized_pl),plPct=parseFloat(p.unrealized_plpc)*100;
+        return\`<div class="pos-row">
+          <span style="font-family:'Orbitron',monospace;font-size:11px;color:#c8a84b;letter-spacing:1px">\${p.symbol}</span>
+          <span>\${parseFloat(p.qty).toFixed(3)}</span>
+          <span>\${fmt(parseFloat(p.current_price))}</span>
+          <span>\${fmt(parseFloat(p.market_value))}</span>
+          <span style="color:\${col(pl)}">\${fmtN(pl)}<br><span style="font-size:9px">\${pct(plPct)}</span></span>
+        </div>\`;
+      }).join('')
+    :\`<div style="padding:12px 13px;font-size:10px;color:#3a2e10">NO OPEN POSITIONS</div>\`;
+  document.getElementById('cash-pos-row').innerHTML=\`
+    <div class="pos-row" style="border-top:1px solid #3a2e10;background:#0a0900">
+      <span style="font-family:'Orbitron',monospace;font-size:11px;color:#f5c842;letter-spacing:1px">CASH</span>
+      <span style="color:#3a2e10">—</span><span style="color:#3a2e10">—</span>
+      <span style="color:#f5c842">\${fmt(cash)}</span>
+      <span style="color:#3a2e10">—</span>
+    </div>\`;
+
+  // ORDERS
+  document.getElementById('orders-badge').textContent=(orders||[]).length+' ORDERS';
+  document.getElementById('orders-list').innerHTML=(orders||[]).length>0
+    ?(orders||[]).map(o=>{
+        const side=o.side.toUpperCase();
+        const status=o.status.toUpperCase();
+        const statusCol=status==='FILLED'?'#c8a84b':status==='CANCELED'||status==='REJECTED'?'#ff3333':'#f5a623';
+        const notional=o.notional?'$'+parseFloat(o.notional).toFixed(2):o.qty?o.qty+' sh':'—';
+        const time=o.submitted_at?new Date(o.submitted_at).toLocaleTimeString('en-US',{hour12:false,timeZone:'America/New_York'}):'—';
+        return\`<div style="display:grid;grid-template-columns:60px 50px 65px 90px 1fr;gap:4px;align-items:center;padding:8px 13px;border-bottom:1px solid #150e00;font-size:10px">
+          <span style="font-family:'Orbitron',monospace;font-size:10px;color:#c8a84b;letter-spacing:1px">\${o.symbol}</span>
+          <span style="color:\${side==='BUY'?'#c8a84b':'#ff3333'}">\${side}</span>
+          <span style="color:\${statusCol};font-size:9px">\${status}</span>
+          <span>\${notional}</span>
+          <span style="color:#3a2e10;font-size:9px">\${time}</span>
+        </div>\`;
+      }).join('')
+    :\`<div style="padding:12px 13px;font-size:10px;color:#3a2e10">NO ORDERS TODAY</div>\`;
+
+  // SYSTEM GRID
+  document.getElementById('sys-grid').innerHTML=[
+    ['ALPACA',alpacaOk?'CONNECTED':'ERROR',alpacaOk?'#c8a84b':'#ff3333'],
+    ['RESEND',resendOk?'CONNECTED':'ERROR',resendOk?'#c8a84b':'#ff3333'],
+    ['BRIDGE',bridgeOk?'CONNECTED':'NOT SET',bridgeOk?'#c8a84b':'#f5a623'],
+    ['MARKET',marketOpen?'OPEN':'CLOSED',marketOpen?'#c8a84b':'#3a2e10'],
+    ['OVERRIDE',overrideActive?'ACTIVE':'INACTIVE',overrideActive?'#ff3333':'#3a2e10'],
+    ['MODE',mode||'PAPER','#c8a84b88'],
+  ].map(([k,v,c])=>\`<div style="background:#0a0900;border:1px solid #3a2e10;padding:8px;border-radius:2px">
+    <div style="font-size:8px;color:#c8a84b33;letter-spacing:2px;margin-bottom:3px">\${k}</div>
+    <div style="font-family:'Orbitron',monospace;font-size:11px;color:\${c};letter-spacing:1px">\${v}</div>
+  </div>\`).join('');
+
+  // COMMAND LOG
+  document.getElementById('cmd-log').innerHTML=(commandLog||[]).map(l=>{
+    const isErr=l.includes('ERROR')||l.includes('failed')||l.includes('Failed');
+    const isOk =l.includes('✓')||l.includes('Executed')||l.includes('SUCCESS');
+    const mc=isErr?'#ff3333':isOk?'#c8a84b':'#c8a84b66';
+    const tm=l.match(/\[(.+? ET)\]/);
+    const msg=l.replace(/^\[.+? ET\] \[.+?\] /,'');
+    return\`<div class="ll"><span class="lt">\${tm?tm[1]:''}</span><span class="lm" style="color:\${mc}">\${msg}</span></div>\`;
+  }).join('');
+  document.getElementById('log-badge').textContent=(commandLog||[]).length+' ENTRIES';
+
+  // RATE LIMIT
+  document.getElementById('rl-count').textContent=commandCount||0;
+  document.getElementById('rl-badge').textContent=(commandCount||0)+'/'+(commandMax||10);
+  document.getElementById('rl-bar').style.width=((commandCount||0)/(commandMax||10)*100).toFixed(0)+'%';
+}
+
+// ── COMMAND FUNCTIONS ─────────────────────────────────────────
+function setCmd(cmd){ document.getElementById('cmd-input').value=cmd; }
+
+function transmitCommand(){
+  const cmd=document.getElementById('cmd-input').value.trim();
+  if(!cmd){ document.getElementById('cmd-output').textContent='ERROR: ENTER A COMMAND SUBJECT'; return; }
+  const mailto=\`mailto:apex@coraemjen.resend.app?subject=\${encodeURIComponent(cmd)}&body=\`;
+  document.getElementById('cmd-output').textContent='OPENING EMAIL CLIENT...\\nTO: apex@coraemjen.resend.app\\nSUBJECT: '+cmd;
+  window.location.href=mailto;
+}
+
+function requestStatusNow(){
+  const mailto='mailto:apex@coraemjen.resend.app?subject=APEX%20STATUS&body=';
+  document.getElementById('cmd-output').textContent='TRANSMITTING STATUS REQUEST...\\nTO: apex@coraemjen.resend.app\\nSUBJECT: APEX STATUS';
+  window.location.href=mailto;
+}
+
+function showOverride(){
+  document.getElementById('override-confirm').style.display='block';
+  document.getElementById('override-input').focus();
+}
+function cancelOverride(){
+  document.getElementById('override-confirm').style.display='none';
+  document.getElementById('override-input').value='';
+}
+function confirmOverride(){
+  if(document.getElementById('override-input').value.trim().toUpperCase()!=='OVERRIDE'){
+    document.getElementById('cmd-output').textContent='ERROR: TYPE "OVERRIDE" TO CONFIRM';
+    return;
+  }
+  const mailto='mailto:apex@coraemjen.resend.app?subject=APEX%20OVERRIDE%20CONFIRM&body=';
+  document.getElementById('cmd-output').textContent='OVERRIDE TRANSMITTED — LIQUIDATING ALL POSITIONS\\nTO: apex@coraemjen.resend.app';
+  cancelOverride();
+  window.location.href=mailto;
+}
+
+fetchData();
+setInterval(fetchData, 30000);
+</script>
+</body>
+</html>`;
 
 // ── BOOT ──────────────────────────────────────────────────────
 async function boot() {
