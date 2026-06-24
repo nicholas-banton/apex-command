@@ -28,6 +28,11 @@ const CONFIG = {
   // GitHub Gist bridge — read Savant's current directive
   GITHUB_TOKEN:       process.env.GITHUB_TOKEN       || "",
   GITHUB_GIST_ID:     process.env.GITHUB_GIST_ID     || "",
+
+  // Dashboard reads only. Trade execution paths remain unchanged.
+  DASHBOARD_READ_TIMEOUT_MS: 8000,
+  DASHBOARD_CACHE_MS_OPEN:   60 * 1000,
+  DASHBOARD_CACHE_MS_CLOSED: 5 * 60 * 1000,
 };
 
 // ── STATE ─────────────────────────────────────────────────────
@@ -65,8 +70,18 @@ const ALPACA_HEADERS = () => ({
   "Content-Type":        "application/json",
 });
 
-function alpacaCall(path, method = "GET", body = null) {
+function alpacaCall(path, method = "GET", body = null, { timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId = null;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      fn(value);
+    };
+
     const url  = new URL(CONFIG.ALPACA_BASE_URL + path);
     const opts = {
       hostname: url.hostname,
@@ -74,15 +89,33 @@ function alpacaCall(path, method = "GET", body = null) {
       method,
       headers:  ALPACA_HEADERS(),
     };
+
     const req = https.request(opts, res => {
       let d = "";
+
       res.on("data", c => d += c);
+
       res.on("end", () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(d) }); }
-        catch(e) { resolve({ status: res.statusCode, body: d }); }
+        try {
+          finish(resolve, { status: res.statusCode, body: JSON.parse(d) });
+        } catch (_) {
+          finish(resolve, { status: res.statusCode, body: d });
+        }
       });
     });
-    req.on("error", reject);
+
+    req.on("error", error => finish(reject, error));
+
+    if (timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        const error = new Error(
+          `Alpaca ${method} ${path} timed out after ${timeoutMs}ms`
+        );
+        error.code = "ETIMEDOUT";
+        req.destroy(error);
+      }, timeoutMs);
+    }
+
     if (body) req.write(JSON.stringify(body));
     req.end();
   });
@@ -180,10 +213,21 @@ async function fetchEmailContent(emailId) {
 }
 
 // ── READ SAVANT DIRECTIVE FROM GIST ───────────────────────────
-async function getSavantDirective() {
+async function getSavantDirective({ timeoutMs = 0 } = {}) {
   if (!CONFIG.GITHUB_TOKEN || !CONFIG.GITHUB_GIST_ID) return null;
+
   try {
     const r = await new Promise((resolve, reject) => {
+      let settled = false;
+      let timeoutId = null;
+
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        fn(value);
+      };
+
       const req = https.request({
         hostname: "api.github.com",
         path:     `/gists/${CONFIG.GITHUB_GIST_ID}`,
@@ -196,16 +240,37 @@ async function getSavantDirective() {
       }, res => {
         let d = "";
         res.on("data", c => d += c);
-        res.on("end", () => resolve({ status: res.statusCode, body: d }));
+        res.on("end", () => finish(resolve, { status: res.statusCode, body: d }));
       });
-      req.on("error", reject);
+
+      req.on("error", error => finish(reject, error));
+
+      if (timeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          const error = new Error(
+            `Savant directive Gist read timed out after ${timeoutMs}ms`
+          );
+          error.code = "ETIMEDOUT";
+          req.destroy(error);
+        }, timeoutMs);
+      }
+
       req.end();
     });
-    if (r.status !== 200) return null;
+
+    if (r.status !== 200) {
+      log(`Savant directive Gist returned HTTP ${r.status}`, "WARN");
+      return null;
+    }
+
     const gist    = JSON.parse(r.body);
     const content = gist?.files?.["apex-directive.json"]?.content;
     return content ? JSON.parse(content) : null;
-  } catch(e) { return null; }
+
+  } catch (e) {
+    log(`Savant directive read failed: ${e.code || e.message}`, "WARN");
+    return null;
+  }
 }
 
 // ── WEBHOOK SIGNATURE VERIFICATION ────────────────────────────
@@ -939,58 +1004,152 @@ async function handleWebhook(rawBody, headers) {
 // HTTP SERVER
 // ══════════════════════════════════════════════════════════════
 function startServer() {
-  // ── Live data cache (avoids hammering Alpaca on every poll) ──
-  let dataCache = { payload: null, fetchedAt: 0 };
+  // ── Live data cache — individual sources degrade independently ──
+  let dataCache = {
+    payload: null,
+    fetchedAt: 0,
+    account: null,
+    positions: null,
+    orders: null,
+    savant: null,
+    sourceFetchedAt: {
+      account: 0,
+      positions: 0,
+      orders: 0,
+      savant: 0,
+    },
+  };
+
+  async function dashboardAlpacaRead(path, label) {
+    const r = await alpacaCall(path, "GET", null, {
+      timeoutMs: CONFIG.DASHBOARD_READ_TIMEOUT_MS,
+    });
+
+    if (r.status !== 200) {
+      throw new Error(`${label} returned HTTP ${r.status}`);
+    }
+
+    return r.body;
+  }
+
+  function selectDashboardSource(result, key, isValid, now) {
+    if (result.status === "fulfilled" && isValid(result.value)) {
+      dataCache[key] = result.value;
+      dataCache.sourceFetchedAt[key] = now;
+      return { value: result.value, status: "fresh" };
+    }
+
+    if (isValid(dataCache[key])) {
+      return { value: dataCache[key], status: "cached" };
+    }
+
+    return { value: null, status: "unavailable" };
+  }
 
   async function buildLiveData() {
     const now = Date.now();
-    if (dataCache.payload && (now - dataCache.fetchedAt) < 60 * 1000) return dataCache.payload;
-    try {
-      const [account, positions, savant] = await Promise.all([
-        getAccount(), getPositions(), getSavantDirective(),
+    const cacheTtl = isMarketOpen()
+      ? CONFIG.DASHBOARD_CACHE_MS_OPEN
+      : CONFIG.DASHBOARD_CACHE_MS_CLOSED;
+
+    if (dataCache.payload && (now - dataCache.fetchedAt) < cacheTtl) {
+      return dataCache.payload;
+    }
+
+    const et = etNow();
+    const todayStart = new Date(et.getFullYear(), et.getMonth(), et.getDate());
+    const ordersPath = `/v2/orders?status=all&after=${todayStart.toISOString()}&limit=50`;
+
+    const [accountResult, positionsResult, savantResult, ordersResult] =
+      await Promise.allSettled([
+        dashboardAlpacaRead("/v2/account", "Alpaca account"),
+        dashboardAlpacaRead("/v2/positions", "Alpaca positions"),
+        getSavantDirective({ timeoutMs: CONFIG.DASHBOARD_READ_TIMEOUT_MS }),
+        dashboardAlpacaRead(ordersPath, "Alpaca orders"),
       ]);
-      // Today's orders
-      let orders = [];
-      try {
-        const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-        const todayStart = new Date(et.getFullYear(), et.getMonth(), et.getDate());
-        const r = await alpacaCall(`/v2/orders?status=all&after=${todayStart.toISOString()}&limit=50`);
-        if (r.status === 200) orders = r.body;
-      } catch(e) { /* non-fatal */ }
 
-      const equity = account ? parseFloat(account.equity) : 0;
-      const cash   = account ? parseFloat(account.cash)   : 0;
-      const bp     = account ? parseFloat(account.buying_power) : 0;
-      const pnl    = equity - 100000;
-      const pnlPct = (pnl / 100000) * 100;
-      const etNowObj = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-      const etMinsNow = etNowObj.getHours() * 60 + etNowObj.getMinutes();
+    const accountSource = selectDashboardSource(
+      accountResult, "account", value => value && typeof value === "object" && !Array.isArray(value), now
+    );
 
-      const payload = {
-        equity, cash, bp, pnl, pnlPct,
-        positions,
-        orders,
-        savant,
-        overrideActive: state.overrideActive,
-        overrideTime:   state.overrideTime,
-        marketOpen:     isMarketOpen(),
-        commandCount:   state.rateLimitWindow.length,
-        commandMax:     CONFIG.RATE_LIMIT_MAX,
-        commandLog:     state.commandLog.slice(-60).reverse(),
-        bridgeOk:       !!CONFIG.GITHUB_GIST_ID,
-        alpacaOk:       !!CONFIG.ALPACA_KEY_ID,
-        resendOk:       !!CONFIG.RESEND_KEY,
-        etTime: etNowObj.toLocaleTimeString("en-US", { hour12: false }),
-        etDate: etNowObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }),
-        etMins: etMinsNow,
-        mode: CONFIG.ALPACA_BASE_URL.includes("paper") ? "PAPER" : "LIVE",
-      };
-      dataCache = { payload, fetchedAt: now };
-      return payload;
-    } catch(e) {
-      log(`buildLiveData error: ${e.message}`, "ERROR");
+    const positionsSource = selectDashboardSource(
+      positionsResult, "positions", Array.isArray, now
+    );
+
+    const savantSource = selectDashboardSource(
+      savantResult, "savant", value => value && typeof value === "object", now
+    );
+
+    const ordersSource = selectDashboardSource(
+      ordersResult, "orders", Array.isArray, now
+    );
+
+    if (!accountSource.value) {
+      log(
+        `Dashboard data unavailable — account:${accountSource.status} ` +
+        `positions:${positionsSource.status} savant:${savantSource.status}`,
+        "WARN"
+      );
       return dataCache.payload || null;
     }
+
+    const degradedSources = Object.entries({
+      account: accountSource.status,
+      positions: positionsSource.status,
+      savant: savantSource.status,
+      orders: ordersSource.status,
+    }).filter(([, status]) => status !== "fresh");
+
+    if (degradedSources.length) {
+      log(
+        `Dashboard degraded — ${degradedSources.map(([name, status]) => `${name}:${status}`).join(" ")}`,
+        "WARN"
+      );
+    }
+
+    const account = accountSource.value;
+    const positions = positionsSource.value || [];
+    const orders = ordersSource.value || [];
+    const savant = savantSource.value;
+
+    const equity = parseFloat(account.equity);
+    const cash   = parseFloat(account.cash);
+    const bp     = parseFloat(account.buying_power);
+    const pnl    = equity - 100000;
+    const pnlPct = (pnl / 100000) * 100;
+    const etNowObj = etNow();
+    const etMinsNow = etNowObj.getHours() * 60 + etNowObj.getMinutes();
+
+    const payload = {
+      equity, cash, bp, pnl, pnlPct,
+      positions,
+      orders,
+      savant,
+      dataSources: {
+        account: accountSource.status,
+        positions: positionsSource.status,
+        savant: savantSource.status,
+        orders: ordersSource.status,
+      },
+      sourceFetchedAt: { ...dataCache.sourceFetchedAt },
+      overrideActive: state.overrideActive,
+      overrideTime:   state.overrideTime,
+      marketOpen:     isMarketOpen(),
+      commandCount:   state.rateLimitWindow.length,
+      commandMax:     CONFIG.RATE_LIMIT_MAX,
+      commandLog:     state.commandLog.slice(-60).reverse(),
+      bridgeOk:       !!CONFIG.GITHUB_GIST_ID,
+      alpacaOk:       !!CONFIG.ALPACA_KEY_ID,
+      resendOk:       !!CONFIG.RESEND_KEY,
+      etTime: etNowObj.toLocaleTimeString("en-US", { hour12: false }),
+      etDate: etNowObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }),
+      etMins: etMinsNow,
+      mode: CONFIG.ALPACA_BASE_URL.includes("paper") ? "PAPER" : "LIVE",
+    };
+
+    dataCache.payload = payload;
+    dataCache.fetchedAt = now;
+    return payload;
   }
 
   const server = http.createServer(async (req, res) => {
