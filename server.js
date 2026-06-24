@@ -8,6 +8,7 @@
 const https  = require("https");
 const http   = require("http");
 const crypto = require("crypto");
+const { Webhook } = require("svix");
 
 // ── CONFIGURATION ────────────────────────────────────────────
 const CONFIG = {
@@ -35,13 +36,20 @@ const CONFIG = {
   DASHBOARD_CACHE_MS_CLOSED: 5 * 60 * 1000,
 };
 
+const MARSHALL_VERSION = "1.1.0";
+
 // ── STATE ─────────────────────────────────────────────────────
 const state = {
-  overrideActive:   false,
-  overrideTime:     null,
-  commandLog:       [],       // rolling log for rate limiting + dashboard
-  rateLimitWindow:  [],       // timestamps of recent commands
-  processedIds:     new Set(), // prevent duplicate processing
+  overrideActive:         false,
+  overrideTime:           null,
+  commandLog:             [],
+  rateLimitWindow:        [],
+  processedDeliveryIds:   new Set(),
+  startedAt:              new Date().toISOString(),
+  lastDashboardSuccessAt: null,
+  lastDashboardSources:   null,
+  lastWebhookVerifiedAt:  null,
+  lastWebhookRejectedAt:  null,
 };
 
 // ── LOGGING ───────────────────────────────────────────────────
@@ -274,31 +282,59 @@ async function getSavantDirective({ timeoutMs = 0 } = {}) {
 }
 
 // ── WEBHOOK SIGNATURE VERIFICATION ────────────────────────────
-function verifyWebhookSignature(rawBody, signatureHeader) {
-  if (!CONFIG.RESEND_WEBHOOK_SECRET) {
-    log("No webhook secret configured — skipping signature check", "WARN");
-    return true;
+function getHeaderValue(headers, name) {
+  const value = headers?.[name];
+  if (Array.isArray(value)) return value[0] || "";
+  return typeof value === "string" ? value : "";
+}
+
+function normalizeEmailAddress(value) {
+  const raw = String(value || "").trim();
+  const match = raw.match(/<\s*([^>\s]+@[^>\s]+)\s*>/);
+  return (match ? match[1] : raw).trim().toLowerCase();
+}
+
+function claimWebhookDelivery(deliveryId) {
+  if (!deliveryId) return { accepted: false, reason: "missing" };
+
+  if (state.processedDeliveryIds.has(deliveryId)) {
+    return { accepted: false, reason: "duplicate" };
   }
+
+  state.processedDeliveryIds.add(deliveryId);
+
+  if (state.processedDeliveryIds.size > 1000) {
+    state.processedDeliveryIds = new Set(
+      [...state.processedDeliveryIds].slice(-500)
+    );
+  }
+
+  return { accepted: true };
+}
+
+function verifyWebhookSignature(rawBody, headers) {
+  if (!CONFIG.RESEND_WEBHOOK_SECRET) {
+    log("Webhook rejected: RESEND_WEBHOOK_SECRET is not configured", "ERROR");
+    return false;
+  }
+
+  const svixHeaders = {
+    "svix-id":        getHeaderValue(headers, "svix-id"),
+    "svix-timestamp": getHeaderValue(headers, "svix-timestamp"),
+    "svix-signature": getHeaderValue(headers, "svix-signature"),
+  };
+
+  if (!svixHeaders["svix-id"] || !svixHeaders["svix-timestamp"] || !svixHeaders["svix-signature"]) {
+    log("Webhook rejected: missing Svix signature headers", "WARN");
+    return false;
+  }
+
   try {
-    // Resend uses svix-style signing: svix-id, svix-timestamp, svix-signature
-    // Parse the signature header
-    const parts = {};
-    if (signatureHeader) {
-      signatureHeader.split(",").forEach(part => {
-        const [k, v] = part.split("=");
-        if (k && v) parts[k.trim()] = v.trim();
-      });
-    }
-    // Simple HMAC check on raw body
-    const secret = CONFIG.RESEND_WEBHOOK_SECRET.startsWith("whsec_")
-      ? Buffer.from(CONFIG.RESEND_WEBHOOK_SECRET.slice(6), "base64")
-      : Buffer.from(CONFIG.RESEND_WEBHOOK_SECRET);
-    const hmac = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-    // Accept if signature is present and matches, or if no signature sent (dev mode)
-    return true; // Resend svix verification is complex — log and accept, sender validation is primary security
-  } catch(e) {
-    log(`Signature verify error: ${e.message}`, "WARN");
+    new Webhook(CONFIG.RESEND_WEBHOOK_SECRET).verify(rawBody, svixHeaders);
     return true;
+  } catch (error) {
+    log(`Webhook signature rejected: ${error.message}`, "WARN");
+    return false;
   }
 }
 
@@ -909,26 +945,16 @@ async function handleWebhook(rawBody, headers) {
     }
 
     const emailId   = event.data?.email_id || event.data?.id;
-    const fromEmail = event.data?.from?.toLowerCase() || "";
+    const fromEmail = normalizeEmailAddress(event.data?.from);
     const subject   = event.data?.subject || "";
+    const authorizedSender = normalizeEmailAddress(CONFIG.AUTHORIZED_SENDER);
 
-    // Dedup — never process same email twice
-    if (emailId && state.processedIds.has(emailId)) {
-      log(`Duplicate event ignored: ${emailId}`);
+    log(`Email from: ${fromEmail || "unknown"} | Subject: ${subject}`);
+
+    // ── SECURITY: exact authorized sender match ──────────────
+    if (!fromEmail || fromEmail !== authorizedSender) {
+      log(`Rejected: unauthorized sender ${fromEmail || "unknown"}`, "WARN");
       return;
-    }
-    if (emailId) state.processedIds.add(emailId);
-    if (state.processedIds.size > 500) {
-      const arr = [...state.processedIds];
-      state.processedIds = new Set(arr.slice(-250));
-    }
-
-    log(`Email from: ${fromEmail} | Subject: ${subject}`);
-
-    // ── SECURITY: authorized sender only ─────────────────────
-    if (!fromEmail.includes(CONFIG.AUTHORIZED_SENDER)) {
-      log(`Rejected: unauthorized sender ${fromEmail}`, "WARN");
-      return; // silent reject
     }
 
     // ── RATE LIMIT ────────────────────────────────────────────
@@ -1149,6 +1175,8 @@ function startServer() {
 
     dataCache.payload = payload;
     dataCache.fetchedAt = now;
+    state.lastDashboardSuccessAt = new Date(now).toISOString();
+    state.lastDashboardSources = payload.dataSources;
     return payload;
   }
 
@@ -1157,26 +1185,75 @@ function startServer() {
     // ── WEBHOOK ENDPOINT ──────────────────────────────────────
     if (req.method === "POST" && req.url === "/webhook") {
       let rawBody = "";
-      req.on("data", c => rawBody += c);
-      req.on("end", async () => {
-        // Respond 200 immediately — Resend needs fast ACK
+
+      req.on("data", chunk => rawBody += chunk);
+
+      req.on("end", () => {
+        if (!verifyWebhookSignature(rawBody, req.headers)) {
+          state.lastWebhookRejectedAt = new Date().toISOString();
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid webhook signature" }));
+          return;
+        }
+
+        const deliveryId = getHeaderValue(req.headers, "svix-id");
+        const delivery = claimWebhookDelivery(deliveryId);
+
+        if (!delivery.accepted) {
+          log(`Webhook ${delivery.reason} ignored: ${deliveryId || "missing svix-id"}`, "WARN");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            received: true,
+            duplicate: delivery.reason === "duplicate",
+          }));
+          return;
+        }
+
+        state.lastWebhookVerifiedAt = new Date().toISOString();
+
+        // Authenticate first, acknowledge promptly, process asynchronously.
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ received: true }));
-        // Process async after ACK
-        const sigHeader = req.headers["svix-signature"] || req.headers["webhook-signature"] || "";
-        if (verifyWebhookSignature(rawBody, sigHeader)) {
-          await handleWebhook(rawBody, req.headers);
-        } else {
-          log("Webhook signature verification failed", "WARN");
-        }
+
+        void handleWebhook(rawBody, req.headers).catch(error => {
+          log(`Verified webhook processing error: ${error.message}`, "ERROR");
+        });
       });
+
       return;
     }
 
     // ── HEALTH CHECK ──────────────────────────────────────────
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", override: state.overrideActive, commands: state.commandLog.length }));
+      const verificationReady = !!CONFIG.RESEND_WEBHOOK_SECRET;
+
+      const health = {
+        status: verificationReady ? "ok" : "degraded",
+        version: MARSHALL_VERSION,
+        startedAt: state.startedAt,
+        uptimeSeconds: Math.floor(process.uptime()),
+        override: state.overrideActive,
+        commands: state.commandLog.length,
+        integrations: {
+          alpacaConfigured: !!CONFIG.ALPACA_KEY_ID,
+          gistConfigured: !!CONFIG.GITHUB_GIST_ID,
+          resendConfigured: !!CONFIG.RESEND_KEY,
+          webhookVerification: verificationReady ? "enforced" : "blocked",
+        },
+        dashboard: {
+          lastSuccessAt: state.lastDashboardSuccessAt,
+          sources: state.lastDashboardSources,
+        },
+        webhooks: {
+          lastVerifiedAt: state.lastWebhookVerifiedAt,
+          lastRejectedAt: state.lastWebhookRejectedAt,
+        },
+      };
+
+      res.writeHead(verificationReady ? 200 : 503, {
+        "Content-Type": "application/json",
+      });
+      res.end(JSON.stringify(health));
       return;
     }
 
@@ -1724,10 +1801,10 @@ setInterval(fetchData, 30000);
 
 // ── BOOT ──────────────────────────────────────────────────────
 async function boot() {
-  log("⚔⚔⚔ MARSHALL COMMAND LAYER STARTING ⚔⚔⚔");
+  log(`⚔⚔⚔ MARSHALL COMMAND LAYER v${MARSHALL_VERSION} STARTING ⚔⚔⚔`);
   log(`Alpaca: ${CONFIG.ALPACA_KEY_ID ? "✓" : "✗ Not configured"}`);
   log(`Resend: ${CONFIG.RESEND_KEY ? "✓" : "✗ Not configured"}`);
-  log(`Webhook secret: ${CONFIG.RESEND_WEBHOOK_SECRET ? "✓" : "✗ Not configured"}`);
+  log(`Webhook verification: ${CONFIG.RESEND_WEBHOOK_SECRET ? "✓ Enforced" : "✗ BLOCKED — secret missing"}`);
   log(`Gist bridge: ${CONFIG.GITHUB_GIST_ID ? "✓" : "⚠ GITHUB_GIST_ID not set"}`);
   log(`Command address: apex@coraemjen.resend.app`);
   log(`Authorized sender: ${CONFIG.AUTHORIZED_SENDER}`);
@@ -1747,9 +1824,10 @@ async function boot() {
 
   await sendEmail(
     CONFIG.AUTHORIZED_SENDER,
-    "⚔ Marshall Command Layer ONLINE",
+    `⚔ Marshall Command Layer v${MARSHALL_VERSION} ONLINE`,
     [
-      "Marshall Command Layer is now active.",
+      `Marshall Command Layer v${MARSHALL_VERSION} is now active.`,
+      `Webhook signature verification: ${CONFIG.RESEND_WEBHOOK_SECRET ? "ENFORCED" : "BLOCKED"}`,
       "",
       `Command address: apex@coraemjen.resend.app`,
       "",

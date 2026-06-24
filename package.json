@@ -1,6 +1,6 @@
 {
   "name": "apex-command",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Marshall Command Layer — Apex bidirectional email command system",
   "main": "server.js",
   "scripts": {
@@ -8,5 +8,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "svix": "^1.96.0"
   }
 }
