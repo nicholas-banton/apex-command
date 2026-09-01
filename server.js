@@ -17,9 +17,10 @@ const CONFIG = {
   RESEND_WEBHOOK_SECRET: process.env.RESEND_WEBHOOK_SECRET || "",
   ALPACA_KEY_ID:      process.env.ALPACA_KEY_ID      || "",
   ALPACA_SECRET_KEY:  process.env.ALPACA_SECRET_KEY  || "",
-  ALPACA_BASE_URL:    process.env.ALPACA_PAPER === "true"
-                        ? "https://paper-api.alpaca.markets"
-                        : "https://api.alpaca.markets",
+  // v6 safety cutover: this service is a dashboard and command-audit layer,
+  // not an execution authority.  Never select the live endpoint implicitly.
+  ALPACA_BASE_URL:    "https://paper-api.alpaca.markets",
+  EXECUTION_MODE:     "shadow",
   AUTHORIZED_SENDER:  "nicholas.banton@gmail.com",
   FROM_EMAIL:         "Apex Marshall <onboarding@resend.dev>",
   REPLY_TO:           "nicholas.banton@gmail.com",
@@ -134,6 +135,10 @@ async function getPositions() { const r = await alpacaCall("/v2/positions");  re
 async function getOrders()    { const r = await alpacaCall("/v2/orders?status=open"); return r.status === 200 ? r.body : []; }
 
 async function placeOrder({ symbol, notional, qty, side, note = "" }) {
+  log(`ORDER BLOCKED by v6 safety cutover: ${side} ${symbol} (${note || "no note"})`, "WARN");
+  return null;
+  /* istanbul ignore next -- retained only as historical implementation reference */
+  /*
   const body = { symbol, side, type: "market", time_in_force: "day" };
   if (notional) body.notional = notional.toFixed(2);
   else if (qty)  body.qty     = qty;
@@ -144,20 +149,29 @@ async function placeOrder({ symbol, notional, qty, side, note = "" }) {
   }
   log(`✗ Order failed: ${symbol} ${JSON.stringify(r.body)}`, "ERROR");
   return null;
+  */
 }
 
 async function closePosition(symbol, note = "") {
+  log(`CLOSE BLOCKED by v6 safety cutover: ${symbol} (${note || "no note"})`, "WARN");
+  return null;
+  /*
   const r = await alpacaCall(`/v2/positions/${symbol}`, "DELETE");
   if (r.status === 200 || r.status === 201) { log(`✓ Closed ${symbol} — ${note}`); return r.body; }
   log(`✗ Close failed: ${symbol} ${JSON.stringify(r.body)}`, "ERROR");
   return null;
+  */
 }
 
 async function closeAllPositions() {
+  log("CLOSE ALL BLOCKED by v6 safety cutover", "WARN");
+  return null;
+  /*
   const r = await alpacaCall("/v2/positions", "DELETE");
   if (r.status === 200 || r.status === 207) { log("✓ All positions closed"); return r.body; }
   log(`✗ Close all failed: ${JSON.stringify(r.body)}`, "ERROR");
   return null;
+  */
 }
 
 // ── RESEND EMAIL ───────────────────────────────────────────────
