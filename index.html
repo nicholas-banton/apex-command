@@ -787,20 +787,11 @@
 
         <div class="quick-commands">
           <button class="quick-btn" onclick="setCmd('APEX STATUS')">STATUS</button>
-          <button class="quick-btn" onclick="setCmd('APEX REBALANCE')">REBALANCE</button>
-          <button class="quick-btn" onclick="setCmd('APEX RESUME')">RESUME</button>
-          <button class="quick-btn" onclick="setCmd('APEX CASH 2000')">CASH $2K</button>
-          <button class="quick-btn" onclick="setCmd('APEX SELL TQQQ ALL')">SELL TQQQ</button>
-          <button class="quick-btn" onclick="setCmd('APEX SELL GDXJ ALL')">SELL GDXJ</button>
         </div>
 
         <button class="cmd-btn safe" onclick="setCmd('APEX STATUS'); sendCommand()">⬡ REQUEST STATUS NOW</button>
 
-        <hr class="cmd-divider">
-
-        <button class="cmd-btn override" onclick="showOverrideModal()">
-          ⚠ APEX OVERRIDE — LIQUIDATE ALL
-        </button>
+        <p class="panel-note">Shadow-only mode: trading commands are disabled.</p>
 
         <div class="loading" id="loading">
           <span>TRANSMITTING</span>

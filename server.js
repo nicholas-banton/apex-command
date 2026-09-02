@@ -376,37 +376,16 @@ function parseCommand(subject) {
     case "STATUS":
       return { type: "STATUS" };
 
+    // The command layer is telemetry-only during the v6 shadow cutover.
+    // Recognize retired commands so their response is explanatory, never a
+    // misleading failed-order or execution message.
     case "OVERRIDE":
-      return { type: "OVERRIDE" };
-
     case "RESUME":
-      return { type: "RESUME" };
-
     case "REBALANCE":
-      return { type: "REBALANCE" };
-
     case "BUY":
-    case "SELL": {
-      // APEX BUY TQQQ 500 [CONFIRM]
-      const ticker  = parts[2];
-      const amount  = parts[3]; // dollar amount or ALL
-      const confirm = parts.includes("CONFIRM");
-      if (!ticker) return { type: "UNKNOWN" };
-      return {
-        type:    cmd,           // "BUY" or "SELL"
-        ticker,
-        amount:  amount === "ALL" ? "ALL" : parseFloat(amount) || null,
-        confirm,
-      };
-    }
-
-    case "CASH": {
-      // APEX CASH 2000 [YIELD] [CONFIRM]
-      const amount  = parseFloat(parts[2]) || null;
-      const yield_  = parts.includes("YIELD");
-      const confirm = parts.includes("CONFIRM");
-      return { type: "CASH", amount, yield: yield_, confirm };
-    }
+    case "SELL":
+    case "CASH":
+      return { type: "RETIRED", requested: cmd };
 
     default:
       return { type: "UNKNOWN", raw: s };
@@ -996,7 +975,7 @@ async function handleWebhook(rawBody, headers) {
     if (!cmd || cmd.type === "UNKNOWN") {
       await sendEmail(CONFIG.AUTHORIZED_SENDER,
         "APEX: Unknown command",
-        `Unknown command: "${subjectLine}"\n\nValid commands:\n  APEX STATUS\n  APEX OVERRIDE\n  APEX RESUME\n  APEX BUY [TICKER] [AMOUNT]\n  APEX SELL [TICKER] [AMOUNT|ALL]\n  APEX CASH [AMOUNT] [YIELD]\n  APEX REBALANCE\n\n${etNow().toLocaleString()} ET`
+        `Unknown command: "${subjectLine}"\n\nAvailable command:\n  APEX STATUS\n\nTrading commands are retired while Apex operates in shadow-only mode.\n\n${etNow().toLocaleString()} ET`
       );
       return;
     }
@@ -1010,6 +989,7 @@ async function handleWebhook(rawBody, headers) {
     let response;
     switch (cmd.type) {
       case "STATUS":    response = await handleStatus();      break;
+      case "RETIRED":   response = `APEX ${cmd.requested} NOT EXECUTED\n\nApex is operating in shadow-only mode. No orders, liquidations, overrides, cash moves, or rebalances can be submitted from this command layer.\n\nUse APEX STATUS for a read-only portfolio and health snapshot.`; break;
       case "OVERRIDE":  response = await handleOverride();    break;
       case "RESUME":    response = await handleResume();      break;
       case "BUY":
@@ -1544,25 +1524,15 @@ input[type=text]::placeholder{color:#3a2e10}
         <input type="text" id="cmd-input" placeholder="TYPE COMMAND SUBJECT..." style="margin-bottom:10px">
         <button class="btn-cmd btn-primary" onclick="transmitCommand()" style="margin-bottom:12px;font-size:11px;letter-spacing:3px;padding:9px">▶ TRANSMIT COMMAND</button>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+        <div style="margin-bottom:10px">
           <button class="btn-cmd" onclick="setCmd('APEX STATUS')">STATUS</button>
-          <button class="btn-cmd" onclick="setCmd('APEX REBALANCE')">REBALANCE</button>
-          <button class="btn-cmd" onclick="setCmd('APEX RESUME')">RESUME</button>
-          <button class="btn-cmd" onclick="setCmd('APEX CASH 20K YIELD')">CASH $2K</button>
-          <button class="btn-cmd" onclick="setCmd('APEX SELL TQQQ ALL')">SELL TQQQ</button>
-          <button class="btn-cmd" onclick="setCmd('APEX SELL SOXL ALL')">SELL SOXL</button>
         </div>
 
         <button class="btn-cmd btn-primary" onclick="requestStatusNow()" style="margin-bottom:10px;letter-spacing:2px">◈ REQUEST STATUS NOW</button>
 
-        <div id="override-confirm" style="display:none;padding:10px;background:#150808;border:1px solid #ff333344;border-radius:2px;margin-bottom:8px">
-          <div style="font-size:9px;color:#ff3333;margin-bottom:6px;letter-spacing:2px">TYPE "OVERRIDE" TO CONFIRM LIQUIDATION</div>
-          <input type="text" id="override-input" placeholder="OVERRIDE" style="margin-bottom:6px;border-color:#ff333388">
-          <button class="btn-cmd btn-override" onclick="confirmOverride()" style="font-size:10px">CONFIRM LIQUIDATE ALL</button>
-          <button class="btn-cmd" onclick="cancelOverride()" style="margin-top:4px;font-size:9px">CANCEL</button>
+        <div style="padding:10px;background:#08070000;border:1px solid #3a2e10;border-radius:2px;margin-bottom:8px;font-size:9px;color:#c8a84b88;line-height:1.7">
+          SHADOW-ONLY MODE<br>Trading and liquidation commands are disabled.
         </div>
-
-        <button class="btn-cmd btn-override" onclick="showOverride()" style="letter-spacing:2px">▲ APEX OVERRIDE — LIQUIDATE ALL</button>
 
         <div id="cmd-output" style="margin-top:12px;padding:10px;background:#08070000;border:1px solid #3a2e10;border-radius:2px;font-size:9px;color:#c8a84b44;min-height:60px;font-family:'Share Tech Mono',monospace;line-height:1.7">
           AWAITING COMMAND_
